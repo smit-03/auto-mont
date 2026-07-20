@@ -1,0 +1,71 @@
+version: '3.9'
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_DB: wrp_dev
+      POSTGRES_USER: wrp
+      POSTGRES_PASSWORD: wrp_dev_password
+    ports: ["5432:5432"]
+    volumes: ["postgres_data:/var/lib/postgresql/data"]
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "wrp"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # Local Redis for development only. Production uses Upstash via .env.
+  # Override REDIS_URL in .env to point to Upstash instead.
+  redis:
+    image: redis:7-alpine
+    ports: ["6379:6379"]
+    command: redis-server --save "" --appendonly no
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  backend:
+    build:
+      context: ../backend
+      dockerfile: Dockerfile
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+    environment:
+      DATABASE_URL: postgresql+asyncpg://wrp:wrp_dev_password@postgres:5432/wrp_dev
+      REDIS_URL: redis://redis:6379/0
+      ENVIRONMENT: development
+      DEBUG: "true"
+    ports: ["8000:8000"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - ../backend:/app:cached
+    env_file:
+      - ../backend/.env
+
+  worker:
+    build:
+      context: ../backend
+      dockerfile: Dockerfile
+    command: celery -A app.worker.celery_app worker --loglevel=info -B
+    environment:
+      DATABASE_URL: postgresql+asyncpg://wrp:wrp_dev_password@postgres:5432/wrp_dev
+      REDIS_URL: redis://redis:6379/0
+      ENVIRONMENT: development
+      DEBUG: "true"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - ../backend:/app:cached
+    env_file:
+      - ../backend/.env
+
+volumes:
+  postgres_data:
