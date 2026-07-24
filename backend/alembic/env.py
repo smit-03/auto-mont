@@ -9,6 +9,7 @@ from logging.config import fileConfig
 from typing import Any
 
 from sqlalchemy.ext.asyncio import create_async_engine
+from sqlalchemy.pool import NullPool
 
 from alembic import context
 from app.config import settings
@@ -58,6 +59,11 @@ async def run_migrations_online() -> None:
         settings.DATABASE_URL,
         pool_pre_ping=True,
         future=True,
+        # Supabase transaction pooler (pgbouncer) does not support prepared
+        # statements; asyncpg must disable its statement cache. NullPool because
+        # the pooler manages connections. Mirrors app.database engine config.
+        poolclass=NullPool,
+        connect_args={"statement_cache_size": 0},
     )
 
     async with connectable.connect() as connection:

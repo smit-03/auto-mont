@@ -60,27 +60,29 @@ class N8NAdapter(BaseAdapter):
         since: datetime,
         limit: int = 100,
     ) -> AsyncIterator[NormalizedExecution]:
-        """List executions since the given timestamp."""
+        """List executions since the given timestamp.
+
+        n8n's public API has no server-side date filter (no `lastStartedAfter`)
+        and no offset-based `skip` param — it only supports cursor pagination
+        (`cursor` / response `nextCursor`). Executions are returned newest-first
+        by id, so `since` is applied client-side and paging stops once a page
+        is entirely older than `since`, or n8n reports no further pages.
+        """
         client = await self._get_client()
 
-        # n8n API uses ISO format dates
-        since_str = since.isoformat()
-
-        page = 0
+        cursor: str | None = None
+        fetched = 0
         per_page = min(limit, 50)  # n8n max per page
         rate_limit_retries = 0
         max_rate_limit_retries = 3
 
-        while page * per_page < limit:
+        while fetched < limit:
+            params: dict = {"limit": per_page, "includeData": "true"}
+            if cursor:
+                params["cursor"] = cursor
+
             try:
-                response = await client.get(
-                    "/api/v1/executions",
-                    params={
-                        "limit": per_page,
-                        "skip": page * per_page,
-                        "lastStartedAfter": since_str,
-                    },
-                )
+                response = await client.get("/api/v1/executions", params=params)
                 response.raise_for_status()
                 data = response.json()
 
@@ -88,13 +90,31 @@ class N8NAdapter(BaseAdapter):
                 if not executions:
                     break
 
+                page_has_recent = False
                 for exec_data in executions:
-                    yield self._normalize_execution(exec_data)
+                    started_at_str = exec_data.get("startedAt")
+                    if started_at_str:
+                        started_at = datetime.fromisoformat(
+                            started_at_str.replace("Z", "+00:00")
+                        )
+                        if started_at < since:
+                            continue
+                        page_has_recent = True
+                    else:
+                        page_has_recent = True
 
-                if len(executions) < per_page:
+                    yield self._normalize_execution(exec_data)
+                    fetched += 1
+                    if fetched >= limit:
+                        break
+
+                cursor = data.get("nextCursor")
+                if not cursor or not page_has_recent:
+                    # No more pages, or this whole page was older than `since`
+                    # (and since results are newest-first, all further pages
+                    # would be older still).
                     break
 
-                page += 1
                 rate_limit_retries = 0
                 # Small delay to avoid rate limiting
                 await asyncio.sleep(0.1)

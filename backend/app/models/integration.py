@@ -105,6 +105,14 @@ class Integration(Base):
             "deleted_at",
             postgresql_where=deleted_at.is_(None),
         ),
+        Index(
+            "uq_integrations_workspace_platform_name_active",
+            "workspace_id",
+            "platform",
+            "display_name",
+            unique=True,
+            postgresql_where=deleted_at.is_(None),
+        ),
     )
 
     def __repr__(self) -> str:

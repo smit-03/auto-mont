@@ -49,7 +49,7 @@ class IntegrationRead(BaseModel):
     poll_interval_s: int
     last_polled_at: datetime | None
     status: str
-    metadata: dict
+    config: dict
     created_at: datetime
     deleted_at: datetime | None = None
 

@@ -10,7 +10,7 @@ import redis.asyncio as redis
 from redis.asyncio import Redis
 
 from app.config import settings
-from app.core.logging import get_logger
+from app.core.logging import get_logger, redact_url
 
 logger = get_logger(__name__)
 
@@ -27,7 +27,7 @@ async def get_redis_client() -> Redis:
             decode_responses=True,
             max_connections=20,
         )
-        logger.info("redis.client_created", url=settings.REDIS_URL)
+        logger.info("redis.client_created", url=redact_url(settings.REDIS_URL))
     return _redis_client
 
 

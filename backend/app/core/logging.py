@@ -7,11 +7,36 @@ Provides consistent JSON logging with context binding for traceability.
 import logging
 import sys
 from typing import Any, cast
+from urllib.parse import urlsplit, urlunsplit
 
 import structlog
 from structlog.stdlib import LoggerFactory
 
 from app.config import settings
+
+
+def redact_url(url: str | None) -> str | None:
+    """
+    Reduce a connection/webhook URL to scheme://host:port for safe logging.
+
+    Credentials can live in the userinfo (``user:pass@``), the path (e.g. a
+    Slack webhook token), or the query string, so everything except scheme,
+    host, and port is dropped. Falls back to a marker if the URL cannot be
+    parsed, so a secret is never emitted even on malformed input.
+    """
+    if not url:
+        return url
+    try:
+        parts = urlsplit(url)
+    except ValueError:
+        return "<unparseable-url>"
+    if not parts.hostname:
+        # No recognizable host component; refuse to echo the raw string.
+        return "<redacted-url>"
+    netloc = parts.hostname
+    if parts.port is not None:
+        netloc = f"{netloc}:{parts.port}"
+    return urlunsplit((parts.scheme, netloc, "", "", ""))
 
 
 def configure_logging() -> None:
@@ -168,7 +193,7 @@ def log_external_call(
         "external.call",
         service=service,
         method=method,
-        url=url,
+        url=redact_url(url),
         status_code=status_code,
         duration_ms=duration_ms,
         **kwargs,

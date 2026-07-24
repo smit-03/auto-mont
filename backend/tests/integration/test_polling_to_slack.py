@@ -26,7 +26,7 @@ from app.services.sentinel.n8n_adapter import N8NAdapter
 
 # Severity is not part of RuleMatch; the glue task derives it. Mirror that
 # mapping here so the alert handed to Slack is realistic.
-_CATEGORY_SEVERITY = {"auth": "critical", "api": "warning", "silent": "critical"}
+_CATEGORY_SEVERITY = {"auth": "critical", "api": "warning", "silent": "critical", "unknown": "warning"}
 
 
 class InMemoryCache:
@@ -53,6 +53,30 @@ def _n8n_payload(error_message: str) -> dict:
                 "mode": "trigger",
                 "startedAt": "2026-07-18T00:00:00.000Z",
                 "stoppedAt": "2026-07-18T00:00:02.000Z",
+                "workflowId": "wf_test",
+                "workflowName": "Test Workflow",
+                "status": "error",
+                "data": {"resultData": {"error": {"message": error_message, "name": "NodeApiError"}}},
+            }
+        ]
+    }
+
+
+def _recent_n8n_payload(error_message: str) -> dict:
+    """A single n8n execution page with a run timestamped just now.
+
+    Used by tests that go through poll_integration_executions_async, whose
+    `since` filter (last 5 minutes) would drop a fixed historical timestamp.
+    """
+    now = datetime.now(UTC)
+    return {
+        "data": [
+            {
+                "id": "exec_integ_1",
+                "finished": True,
+                "mode": "trigger",
+                "startedAt": now.strftime("%Y-%m-%dT%H:%M:%S.000Z"),
+                "stoppedAt": now.strftime("%Y-%m-%dT%H:%M:%S.000Z"),
                 "workflowId": "wf_test",
                 "workflowName": "Test Workflow",
                 "status": "error",
@@ -269,6 +293,49 @@ class TestPollToAlertToSlack:
         mock_post.assert_awaited_once()
 
     @pytest.mark.asyncio
+    async def test_unknown_failure_falls_back_to_generic_alert(self):
+        """An unmatched failed execution should still create an UNKNOWN alert and post to Slack."""
+        import uuid
+
+        from app.worker.tasks import polling
+
+        integration = polling.Integration(
+            id=uuid.uuid4(),
+            workspace_id=uuid.uuid4(),
+            platform="n8n",
+            display_name="Test n8n",
+            base_url="http://n8n.test",
+            last_polled_at=None,
+        )
+
+        adapter = _mock_n8n_adapter(_recent_n8n_payload("dns lookup failed for host example.test"))
+        fake_factory = FakeSessionFactory()
+        cache = InMemoryCache()
+
+        slack_response = MagicMock()
+        slack_response.raise_for_status = MagicMock()
+
+        def _dispatcher_factory():
+            d = NotificationDispatcher(cache=cache)
+            d.slack = SlackNotifier(webhook_url="https://hooks.slack.test/xxx")
+            return d
+
+        with (
+            patch.object(polling, "get_session_factory", return_value=fake_factory),
+            patch.object(polling, "_get_adapter", return_value=adapter),
+            patch.object(polling, "NotificationDispatcher", _dispatcher_factory),
+            patch("httpx.AsyncClient.post", new=AsyncMock(return_value=slack_response)) as mock_post,
+        ):
+            fetched = await polling.poll_integration_executions_async(integration)
+
+        assert fetched == 1
+        alerts = [obj for obj in fake_factory.added if isinstance(obj, Alert)]
+        assert len(alerts) == 1
+        assert alerts[0].category == "unknown"
+        assert alerts[0].severity == "warning"
+        mock_post.assert_awaited_once()
+
+    @pytest.mark.asyncio
     async def test_production_task_end_to_end(self):
         """
         Call the REAL production task poll_integration_executions_async (D7 wiring):
@@ -291,7 +358,7 @@ class TestPollToAlertToSlack:
             last_polled_at=None,
         )
 
-        adapter = _mock_n8n_adapter(_n8n_payload("invalid_grant: token revoked"))
+        adapter = _mock_n8n_adapter(_recent_n8n_payload("invalid_grant: token revoked"))
         fake_factory = FakeSessionFactory()
         cache = InMemoryCache()
 
@@ -338,13 +405,14 @@ class TestPollToAlertToSlack:
             last_polled_at=None,
         )
 
+        now = datetime.now(UTC)
         healthy_payload = {
             "data": [
                 {
                     "id": "exec_ok",
                     "finished": True,
-                    "startedAt": "2026-07-18T00:00:00.000Z",
-                    "stoppedAt": "2026-07-18T00:00:01.000Z",
+                    "startedAt": now.strftime("%Y-%m-%dT%H:%M:%S.000Z"),
+                    "stoppedAt": now.strftime("%Y-%m-%dT%H:%M:%S.000Z"),
                     "workflowId": "wf_ok",
                     "workflowName": "Healthy Workflow",
                     "status": "success",

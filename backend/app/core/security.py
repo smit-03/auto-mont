@@ -9,10 +9,12 @@ Provides:
 
 import hashlib
 import secrets
+from functools import lru_cache
 from typing import cast
 
+import jwt
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
-from jose import JWTError, jwt
+from jwt import PyJWKClient
 from passlib.context import CryptContext
 
 from app.config import settings
@@ -37,29 +39,44 @@ def generate_api_key(prefix: str = "wrp_live") -> str:
     return f"{prefix}_{random_part}"
 
 
+@lru_cache(maxsize=1)
+def _get_jwks_client() -> PyJWKClient:
+    """
+    Build a cached JWKS client for the configured Clerk issuer.
+
+    Clerk publishes its rotating RS256 public keys at
+    <issuer>/.well-known/jwks.json. PyJWKClient fetches and caches them,
+    refetching when it sees a token signed by an unknown key id (kid).
+    """
+    if not settings.JWT_ISSUER:
+        raise RuntimeError("JWT_ISSUER must be set to verify Clerk tokens")
+    jwks_url = f"{settings.JWT_ISSUER.rstrip('/')}/.well-known/jwks.json"
+    return PyJWKClient(jwks_url)
+
+
 def verify_jwt_token(token: str) -> dict | None:
     """
     Verify a Clerk JWT token.
 
-    Verifies signature, expiry, issuer, and audience. Returns the decoded
-    payload if valid, None if invalid.
+    Selects the RS256 public key from Clerk's JWKS by the token's `kid`,
+    verifies signature, expiry, issuer, and (optionally) audience. Returns
+    the decoded payload if valid, None if invalid.
     """
     try:
-        # Clerk uses RS256 with their public key
-        # For symmetric keys (testing), use HS256
+        signing_key = _get_jwks_client().get_signing_key_from_jwt(token)
         payload = jwt.decode(
             token,
-            settings.JWT_SECRET_KEY,
+            signing_key.key,
             algorithms=[settings.JWT_ALGORITHM],
-            audience=settings.JWT_AUDIENCE,
-            issuer=settings.JWT_ISSUER,
+            audience=settings.JWT_AUDIENCE or None,
+            issuer=settings.JWT_ISSUER or None,
             options={
-                "verify_aud": settings.JWT_AUDIENCE is not None,
-                "verify_iss": settings.JWT_ISSUER is not None,
+                "verify_aud": bool(settings.JWT_AUDIENCE),
+                "verify_iss": bool(settings.JWT_ISSUER),
             },
         )
         return cast(dict, payload)
-    except JWTError:
+    except (jwt.PyJWTError, jwt.PyJWKClientError):
         return None
 
 

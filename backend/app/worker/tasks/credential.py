@@ -18,16 +18,16 @@ from app.services.notifications.dispatcher import NotificationDispatcher
 logger = get_logger(__name__)
 
 
-@shared_task(bind=True, name="check_all_credentials")
+@shared_task(bind=True, name="app.worker.tasks.credential.check_all_credentials")
 def check_all_credentials(self: Task) -> dict:
     """
     Check all credentials for expiry issues.
 
     This is the beat-scheduled task that runs hourly.
     """
-    import asyncio
+    from app.worker.loop import run_async
 
-    return asyncio.run(check_all_credentials_async())
+    return run_async(check_all_credentials_async())
 
 
 async def check_all_credentials_async() -> dict:

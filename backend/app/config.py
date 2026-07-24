@@ -5,16 +5,21 @@ All environment variables are defined here with validation and defaults.
 """
 
 from functools import lru_cache
+from pathlib import Path
 
+from dotenv import dotenv_values
 from pydantic import Field, ValidationInfo, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+BACKEND_DIR = Path(__file__).resolve().parent.parent
+ENV_FILE = BACKEND_DIR / ".env"
 
 
 class Settings(BaseSettings):
     """Application settings loaded from environment variables."""
 
     model_config = SettingsConfigDict(
-        env_file=".env",
+        env_file=ENV_FILE,
         env_file_encoding="utf-8",
         case_sensitive=False,
         extra="ignore",
@@ -152,15 +157,23 @@ class Settings(BaseSettings):
     @classmethod
     def set_celery_broker(cls, v: str | None, info: ValidationInfo) -> str:
         if v:
-            return v
-        return str(info.data.get("REDIS_URL", "redis://localhost:6379/0"))
+            return cls._ensure_ssl_cert_reqs(v)
+        return cls._ensure_ssl_cert_reqs(str(info.data.get("REDIS_URL", "redis://localhost:6379/0")))
 
     @field_validator("CELERY_RESULT_BACKEND", mode="before")
     @classmethod
     def set_celery_backend(cls, v: str | None, info: ValidationInfo) -> str:
         if v:
-            return v
-        return str(info.data.get("REDIS_URL", "redis://localhost:6379/0"))
+            return cls._ensure_ssl_cert_reqs(v)
+        return cls._ensure_ssl_cert_reqs(str(info.data.get("REDIS_URL", "redis://localhost:6379/0")))
+
+    @staticmethod
+    def _ensure_ssl_cert_reqs(url: str) -> str:
+        """Append ssl_cert_reqs=CERT_NONE to rediss:// URLs if missing."""
+        if url.startswith("rediss://") and "ssl_cert_reqs" not in url:
+            sep = "&" if "?" in url else "?"
+            return f"{url}{sep}ssl_cert_reqs=CERT_NONE"
+        return url
 
     @field_validator("CREDENTIAL_MASTER_KEY", mode="after")
     @classmethod
@@ -183,8 +196,11 @@ class Settings(BaseSettings):
 
 @lru_cache
 def get_settings() -> Settings:
-    """Get cached settings instance."""
-    return Settings()
+    """Get cached settings instance from the backend .env file."""
+    env_values = {}
+    if ENV_FILE.exists():
+        env_values = {key: value for key, value in dotenv_values(ENV_FILE).items() if value is not None}
+    return Settings(**env_values)
 
 
 # Export for convenience

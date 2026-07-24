@@ -18,16 +18,16 @@ from app.services.notifications.dispatcher import NotificationDispatcher
 logger = get_logger(__name__)
 
 
-@shared_task(bind=True, name="check_all_monitors")
+@shared_task(bind=True, name="app.worker.tasks.heartbeat.check_all_monitors")
 def check_all_monitors(self: Task) -> dict:
     """
     Check all monitors for heartbeat violations.
 
     This is the beat-scheduled task that runs every minute.
     """
-    import asyncio
+    from app.worker.loop import run_async
 
-    return asyncio.run(check_all_monitors_async())
+    return run_async(check_all_monitors_async())
 
 
 async def check_all_monitors_async() -> dict:

@@ -37,6 +37,7 @@ _CATEGORY_SEVERITY = {
     "schema": "warning",
     "logic": "warning",
     "ai": "warning",
+    "unknown": "warning",
 }
 
 
@@ -62,7 +63,7 @@ def _get_adapter(integration: Integration) -> BaseAdapter:
         raise IntegrationError(f"Unknown platform: {integration.platform}", integration.platform)
 
 
-@shared_task(bind=True, name="poll_all_integrations")
+@shared_task(bind=True, name="app.worker.tasks.polling.poll_all_integrations")
 def poll_all_integrations(self: Task) -> dict:
     """
     Poll all active integrations for new executions.
@@ -70,7 +71,7 @@ def poll_all_integrations(self: Task) -> dict:
     This is the beat-scheduled task that triggers polling for all
     integrations with polling_enabled=true.
     """
-    import asyncio
+    from app.worker.loop import run_async
 
     async def _poll() -> dict:
         async with get_session_factory().begin() as session:
@@ -99,10 +100,10 @@ def poll_all_integrations(self: Task) -> dict:
 
         return results
 
-    return asyncio.run(_poll())
+    return run_async(_poll())
 
 
-@shared_task(bind=True, name="poll_integration_executions")
+@shared_task(bind=True, name="app.worker.tasks.polling.poll_integration_executions")
 def poll_integration_executions(self: Task, integration_id: str) -> int:
     """
     Poll a specific integration for executions.
@@ -113,7 +114,7 @@ def poll_integration_executions(self: Task, integration_id: str) -> int:
     Returns:
         Number of executions fetched
     """
-    import asyncio
+    from app.worker.loop import run_async
 
     async def _poll_one() -> int:
         async with get_session_factory().begin() as session:
@@ -126,7 +127,7 @@ def poll_integration_executions(self: Task, integration_id: str) -> int:
                 return 0
         return await poll_integration_executions_async(integration)
 
-    return asyncio.run(_poll_one())
+    return run_async(_poll_one())
 
 
 async def poll_integration_executions_async(integration: Integration) -> int:

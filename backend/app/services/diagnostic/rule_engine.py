@@ -21,7 +21,7 @@ class RuleMatch:
     """Result of a rule match."""
 
     rule_id: str
-    category: Literal["auth", "api", "logic", "schema", "infra", "ai", "silent"]
+    category: Literal["auth", "api", "logic", "schema", "infra", "ai", "silent", "unknown"]
     root_cause: str
     confidence: float
     suggested_fix: str
@@ -124,6 +124,21 @@ SIGNATURE_RULES: list[dict] = [
         "remediation_playbook": "heartbeat_alert",
         "requires_hitl": True,
     },
+    {
+        "id": "UNKNOWN_001",
+        "pattern": None,
+        "field": "error_message",
+        "match": "fallback_failed_execution",
+        "category": "unknown",
+        "root_cause": "Unknown execution failure — raw error captured for investigation",
+        "confidence": 0.35,
+        "suggested_fix": (
+            "Review the raw error message and workflow logs to determine the root cause. "
+            "If the failure is unexpected, inspect the node execution details and recent changes."
+        ),
+        "remediation_playbook": None,
+        "requires_hitl": True,
+    },
 ]
 
 
@@ -139,6 +154,7 @@ class DiagnosticRuleEngine:
         self.rules = rules or SIGNATURE_RULES
         # Pre-compile regex patterns for faster matching
         self._compiled_rules: list[dict] = []
+        self._fallback_rule: dict | None = None
         for rule in self.rules:
             compiled = rule.copy()
             if rule["match"] in ("contains", "contains_lower") and rule["pattern"]:
@@ -146,19 +162,38 @@ class DiagnosticRuleEngine:
                     re.escape(rule["pattern"]),
                     re.IGNORECASE if rule["match"] == "contains_lower" else 0,
                 )
-            self._compiled_rules.append(compiled)
+            if rule["id"] == "UNKNOWN_001":
+                self._fallback_rule = compiled
+            else:
+                self._compiled_rules.append(compiled)
+
+        if self._fallback_rule is None:
+            self._fallback_rule = {
+                "id": "UNKNOWN_001",
+                "category": "unknown",
+                "root_cause": "Unknown execution failure — raw error captured for investigation",
+                "confidence": 0.35,
+                "suggested_fix": (
+                    "Review the raw error message and workflow logs to determine the root cause. "
+                    "If the failure is unexpected, inspect the node execution details and recent changes."
+                ),
+                "remediation_playbook": None,
+                "requires_hitl": True,
+            }
 
     def diagnose(self, execution: dict) -> RuleMatch | None:
         """
         Diagnose an execution using static rules.
 
-        Returns the first matching rule or None if no match.
+        Returns the first matching rule or a fallback UNKNOWN alert for failed
+        executions when no signature matches.
         """
         # Check for silent failure (items_processed == 0 with success status)
         if execution.get("items_processed") == 0 and execution.get("status") == "success":
             return self._apply_rule(self._compiled_rules[-1], execution)
 
         error_message = execution.get("error_message", "") or ""
+        status = str(execution.get("status") or "").strip().lower()
 
         for rule in self._compiled_rules:
             if rule["match"] == "equals_zero_on_success":
@@ -173,6 +208,15 @@ class DiagnosticRuleEngine:
                     execution_id=execution.get("id"),
                 )
                 return self._apply_rule(rule, execution)
+
+        if status in {"error", "failed"} and self._fallback_rule is not None:
+            logger.info(
+                "rule.fallback_used",
+                execution_id=execution.get("id"),
+                status=status,
+                error_message=error_message,
+            )
+            return self._apply_rule(self._fallback_rule, execution)
 
         return None
 

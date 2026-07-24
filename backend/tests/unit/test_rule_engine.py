@@ -122,8 +122,8 @@ class TestDiagnosticRuleEngine:
 
         assert result is None
 
-    def test_unknown_error_returns_none(self, engine):
-        """Unknown error patterns should return None."""
+    def test_unknown_error_returns_fallback_rule_for_failed_execution(self, engine):
+        """Failed executions without a signature match should return an UNKNOWN fallback rule."""
         exec_data = {
             "status": "error",
             "items_processed": 100,
@@ -131,7 +131,12 @@ class TestDiagnosticRuleEngine:
         }
         result = engine.diagnose(exec_data)
 
-        assert result is None
+        assert result is not None
+        assert result.rule_id == "UNKNOWN_001"
+        assert result.category == "unknown"
+        assert result.confidence == 0.35
+        assert "raw error" in result.root_cause.lower()
+        assert result.suggested_fix
 
     # Rule count verification
     def test_rule_count_minimum(self):

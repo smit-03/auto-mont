@@ -7,6 +7,7 @@ from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_workspace, get_db_session
@@ -62,7 +63,17 @@ async def create_integration(
         poll_interval_s=payload.poll_interval_s,
     )
     session.add(integration)
-    await session.commit()
+    try:
+        await session.commit()
+    except IntegrityError:
+        await session.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                f"An active '{payload.platform}' integration named "
+                f"'{payload.display_name}' already exists"
+            ),
+        ) from None
     await session.refresh(integration)
 
     return IntegrationRead.model_validate(integration)

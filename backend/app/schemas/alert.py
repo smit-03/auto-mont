@@ -19,7 +19,7 @@ class AlertRead(BaseModel):
     monitor_id: uuid.UUID | None
     credential_id: uuid.UUID | None
     severity: Literal["info", "warning", "critical"]
-    category: Literal["auth", "api", "logic", "schema", "infra", "ai", "silent"]
+    category: Literal["auth", "api", "logic", "schema", "infra", "ai", "silent", "unknown"]
     title: str
     description: str
     root_cause: str | None
@@ -47,7 +47,7 @@ class AlertListParams(BaseModel):
     model_config = ConfigDict(strict=True)
 
     severity: Literal["info", "warning", "critical"] | None = None
-    category: Literal["auth", "api", "logic", "schema", "infra", "ai", "silent"] | None = None
+    category: Literal["auth", "api", "logic", "schema", "infra", "ai", "silent", "unknown"] | None = None
     resolved: bool | None = None
     after: str | None = None  # Cursor for pagination
     limit: int = 50

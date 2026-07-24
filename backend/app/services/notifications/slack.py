@@ -116,8 +116,8 @@ class SlackNotifier:
                             "text": "View in Dashboard",
                             "emoji": True,
                         },
-                        "url": settings.CORS_ORIGINS[0]
-                        if settings.CORS_ORIGINS
+                        "url": settings.cors_origins_list[0]
+                        if settings.cors_origins_list
                         else "http://localhost:3000",
                     }
                 ],
