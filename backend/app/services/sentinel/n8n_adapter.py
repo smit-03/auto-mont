@@ -185,15 +185,20 @@ class N8NAdapter(BaseAdapter):
 
     def _normalize_execution(self, exec_data: dict) -> NormalizedExecution:
         """Convert n8n execution response to NormalizedExecution."""
-        # n8n status field may be a boolean 'finished' or a string 'status'
+        # n8n reports terminal state two ways: a boolean `finished` and a
+        # string `status`. Always prefer `status` and route it through the
+        # mapping table — treating "anything finished that isn't 'error'" as
+        # success silently records `crashed` and `canceled` runs as healthy,
+        # which is exactly the class of failure this platform exists to catch.
         finished = exec_data.get("finished", False)
-        status_str = exec_data.get("status", "running")
+        raw_status = exec_data.get("status")
 
-        # Determine normalized status
-        if finished:
-            status = "success" if exec_data.get("status") != "error" else "error"
+        if raw_status:
+            status = self.normalize_status(str(raw_status))
+        elif finished:
+            status = "success"
         else:
-            status = self.normalize_status(status_str)
+            status = "running"
 
         # Extract error info
         error_msg = None

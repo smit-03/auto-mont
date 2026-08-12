@@ -59,9 +59,13 @@ async def create_monitor(
     workspace: Workspace = Depends(get_current_workspace),
 ) -> MonitorRead:
     """Create a monitor. Heartbeat monitors get a unique ping URL."""
+    ping_token = None
     ping_url = None
     if payload.monitor_type == "heartbeat":
-        ping_url = f"/ping/{secrets.token_urlsafe(24)}"
+        # Token is stored in its own indexed column and matched by equality;
+        # ping_url is the display/copy value derived from it.
+        ping_token = secrets.token_urlsafe(24)
+        ping_url = f"/ping/{ping_token}"
 
     monitor = Monitor(
         workspace_id=workspace.id,
@@ -69,6 +73,7 @@ async def create_monitor(
         name=payload.name,
         description=payload.description,
         monitor_type=payload.monitor_type,
+        ping_token=ping_token,
         ping_url=ping_url,
         expected_cron=payload.expected_cron,
         grace_period_s=payload.grace_period_s,

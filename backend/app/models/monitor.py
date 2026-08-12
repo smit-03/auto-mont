@@ -45,6 +45,14 @@ class Monitor(Base):
         String(20),
         nullable=False,
     )  # heartbeat | outcome | cron | schema
+    # The token is its own indexed column, matched by equality. It used to be
+    # extracted from ping_url with a LIKE '%token%' substring scan, which was
+    # unindexed (a full table scan on every public request), could match the
+    # wrong monitor when one token was a substring of another URL, and raised
+    # MultipleResultsFound — a 500 on an unauthenticated endpoint — when it did.
+    ping_token: Mapped[str | None] = mapped_column(
+        String(64), nullable=True, unique=True, index=True
+    )
     ping_url: Mapped[str | None] = mapped_column(Text, nullable=True, unique=True)
     expected_cron: Mapped[str | None] = mapped_column(String(100), nullable=True)
     grace_period_s: Mapped[int] = mapped_column(
@@ -78,12 +86,12 @@ class Monitor(Base):
     workspace: Mapped["Workspace"] = relationship(
         "Workspace",
         back_populates="monitors",
-        lazy="selectin",
+        lazy="raise",
     )
     integration: Mapped[Optional["Integration"]] = relationship(
         "Integration",
         back_populates="monitors",
-        lazy="selectin",
+        lazy="raise",
     )
 
     def __repr__(self) -> str:

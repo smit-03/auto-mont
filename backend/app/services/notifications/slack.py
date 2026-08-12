@@ -25,10 +25,18 @@ class SlackNotifier:
         description: str,
         severity: str,
         suggested_fix: str | None = None,
+        webhook_url: str | None = None,
         **kwargs: object,
     ) -> bool:
-        """Send an alert to Slack via incoming webhook."""
-        if not self.webhook_url:
+        """
+        Send an alert to Slack via incoming webhook.
+
+        `webhook_url` selects the destination per call, so one notifier instance
+        can fan an alert out to several of a workspace's channels. It falls back
+        to the instance's own URL when omitted.
+        """
+        destination = webhook_url or self.webhook_url
+        if not destination:
             logger.warning("slack.webhook_not_configured")
             return False
 
@@ -48,7 +56,7 @@ class SlackNotifier:
         try:
             async with httpx.AsyncClient() as client:
                 response = await client.post(
-                    self.webhook_url,
+                    destination,
                     json=payload,
                     timeout=10.0,
                 )
@@ -116,9 +124,7 @@ class SlackNotifier:
                             "text": "View in Dashboard",
                             "emoji": True,
                         },
-                        "url": settings.cors_origins_list[0]
-                        if settings.cors_origins_list
-                        else "http://localhost:3000",
+                        "url": settings.APP_BASE_URL,
                     }
                 ],
             }

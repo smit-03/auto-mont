@@ -30,8 +30,7 @@ POST /ping/{ping_token}
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| POST | `/workspaces` | Create a new workspace |
-| GET | `/workspaces/me` | Get current workspace details |
+| GET | `/workspaces/me` | Get current workspace details (auto-provisioned on first login) |
 | PATCH | `/workspaces/{id}` | Update workspace |
 
 ### Integrations
@@ -60,6 +59,19 @@ POST /ping/{ping_token}
 | GET | `/monitors` | List monitors |
 | POST | `/monitors` | Create monitor (heartbeat, cron, outcome, schema) |
 | GET | `/monitors/{id}` | Get monitor detail |
+
+### Notification Channels
+
+Alert destinations are per-workspace. A workspace with no channel receives no
+delivery in production — there is deliberately no shared fallback webhook.
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/channels` | List this workspace's channels |
+| POST | `/channels` | Add a channel (required: display_name, destination; destination is encrypted at rest and never returned) |
+| PATCH | `/channels/{id}` | Update display name, enabled flag, or min_severity |
+| DELETE | `/channels/{id}` | Soft-delete a channel |
+| POST | `/channels/{id}/test` | Send a test notification |
 
 ### Alerts
 

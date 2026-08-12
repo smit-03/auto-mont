@@ -3,6 +3,7 @@ Models package - exports all SQLAlchemy models.
 """
 
 from app.models.alert import Alert
+from app.models.channel import NotificationChannel
 from app.models.credential import Credential
 from app.models.execution import Execution
 from app.models.hitl import HITLRequest
@@ -17,5 +18,6 @@ __all__ = [
     "Monitor",
     "Credential",
     "Alert",
+    "NotificationChannel",
     "HITLRequest",
 ]

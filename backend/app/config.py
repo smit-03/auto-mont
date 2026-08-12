@@ -30,6 +30,10 @@ class Settings(BaseSettings):
     # =========================================================================
     APP_NAME: str = "Workflow Reliability Platform"
     APP_VERSION: str = "1.0.0"
+    APP_BASE_URL: str = Field(
+        default="http://localhost:3000",
+        description="Public dashboard URL, used for deep links in notifications",
+    )
     ENVIRONMENT: str = Field(
         default="development", pattern="^(development|staging|production|test)$"
     )
@@ -130,6 +134,10 @@ class Settings(BaseSettings):
     DEFAULT_POLL_INTERVAL_SECONDS: int = Field(default=60, ge=30, le=3600)
     ALERT_DEDUP_WINDOW_SECONDS: int = Field(default=3600, ge=60, le=86400)
     HEARTBEAT_CHECK_INTERVAL_SECONDS: int = Field(default=60, ge=10, le=3600)
+    # /ping/{token} is public and unauthenticated. Limits are per fixed window.
+    PING_RATE_LIMIT_PER_TOKEN: int = Field(default=60, ge=1, le=10000)
+    PING_RATE_LIMIT_PER_IP: int = Field(default=120, ge=1, le=10000)
+    PING_RATE_LIMIT_WINDOW_S: int = Field(default=60, ge=1, le=3600)
     CREDENTIAL_CHECK_INTERVAL_SECONDS: int = Field(default=3600, ge=300, le=86400)
 
     # =========================================================================
@@ -178,19 +186,18 @@ class Settings(BaseSettings):
     @field_validator("CREDENTIAL_MASTER_KEY", mode="after")
     @classmethod
     def validate_master_key(cls, v: str) -> str:
-        if not v:
-            if cls.model_fields["ENVIRONMENT"].default == "development":
-                # Allow empty in dev, will be overridden by test fixtures
-                return "0" * 64
-            raise ValueError(
-                "CREDENTIAL_MASTER_KEY must be set (generate with: openssl rand -hex 32)"
-            )
+        """
+        Validate that the master key is valid hex.
+
+        Length and presence are already enforced by the min/max_length
+        constraints above. pydantic-settings sets validate_default=True, so the
+        empty default is validated too — an unset key fail-closes at startup in
+        every environment rather than falling back to a weak key.
+        """
         try:
             bytes.fromhex(v)
         except ValueError as err:
             raise ValueError("CREDENTIAL_MASTER_KEY must be valid hex string") from err
-        if len(v) != 64:
-            raise ValueError("CREDENTIAL_MASTER_KEY must be 64 hex characters (32 bytes)")
         return v
 
 

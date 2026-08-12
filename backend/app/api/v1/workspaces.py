@@ -1,43 +1,24 @@
 """
-Workspace endpoints - CRUD operations for workspaces.
+Workspace endpoints.
+
+There is deliberately no `POST /workspaces`. Workspaces are provisioned lazily
+by `get_current_workspace()` on a user's first authenticated request, keyed by
+their Clerk identity, so a create endpoint is redundant — and the previous one
+required no authentication at all, letting any unauthenticated caller insert
+arbitrary workspace rows. Renaming is handled by the authenticated
+`PATCH /workspaces/{id}` below.
 """
 
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_workspace, get_db_session
 from app.models.workspace import Workspace
-from app.schemas.workspace import WorkspaceCreate, WorkspaceRead, WorkspaceUpdate
+from app.schemas.workspace import WorkspaceRead, WorkspaceUpdate
 
 router = APIRouter()
-
-
-@router.post("", response_model=WorkspaceRead, status_code=status.HTTP_201_CREATED)
-async def create_workspace(
-    payload: WorkspaceCreate,
-    session: AsyncSession = Depends(get_db_session),
-) -> WorkspaceRead:
-    """Create a new workspace."""
-    # Check if slug exists
-    result = await session.execute(select(Workspace).where(Workspace.slug == payload.slug))
-    if result.scalar_one_or_none():
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail=f"Workspace slug '{payload.slug}' already exists",
-        )
-
-    workspace = Workspace(
-        name=payload.name,
-        slug=payload.slug,
-    )
-    session.add(workspace)
-    await session.commit()
-    await session.refresh(workspace)
-
-    return WorkspaceRead.model_validate(workspace)
 
 
 @router.get("/me", response_model=WorkspaceRead)

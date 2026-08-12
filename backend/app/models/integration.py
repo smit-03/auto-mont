@@ -84,17 +84,17 @@ class Integration(Base):
     workspace: Mapped["Workspace"] = relationship(
         "Workspace",
         back_populates="integrations",
-        lazy="selectin",
+        lazy="raise",
     )
     executions: Mapped[list["Execution"]] = relationship(
         "Execution",
         back_populates="integration",
-        lazy="selectin",
+        lazy="raise",
     )
     monitors: Mapped[list["Monitor"]] = relationship(
         "Monitor",
         back_populates="integration",
-        lazy="selectin",
+        lazy="raise",
     )
 
     # Indexes

@@ -80,6 +80,7 @@ async def init_db() -> None:
     # Import all models to register them with Base.metadata
     from app.models import (  # noqa: F401
         alert,
+        channel,
         credential,
         execution,
         hitl,

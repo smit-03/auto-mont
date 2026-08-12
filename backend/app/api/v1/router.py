@@ -5,6 +5,7 @@ API v1 Router - mounts all v1 endpoints.
 from fastapi import APIRouter
 
 from app.api.v1.alerts import router as alerts_router
+from app.api.v1.channels import router as channels_router
 from app.api.v1.credentials import router as credentials_router
 from app.api.v1.executions import router as executions_router
 from app.api.v1.integrations import router as integrations_router
@@ -20,3 +21,4 @@ api_router.include_router(monitors_router, prefix="/monitors", tags=["monitors"]
 api_router.include_router(alerts_router, prefix="/alerts", tags=["alerts"])
 api_router.include_router(executions_router, prefix="/executions", tags=["executions"])
 api_router.include_router(credentials_router, prefix="/credentials", tags=["credentials"])
+api_router.include_router(channels_router, prefix="/channels", tags=["channels"])

@@ -9,3 +9,11 @@ BLUEPRINT.md
 *.egg-info/
 tsconfig.tsbuildinfo
 next-env.d.ts
+project_docs/
+# Local env files — note: ".env" does NOT match ".env.local"
+.env.local
+.env.*.local
+
+# Celery beat runtime state (regenerated on every worker start)
+celerybeat-schedule*
+celerybeat.pid

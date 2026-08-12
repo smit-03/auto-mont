@@ -58,6 +58,17 @@ class BaseAdapter(ABC):
     async def list_workflow_credentials(self) -> list[dict]:
         """List connected OAuth credentials with metadata."""
 
+    async def close(self) -> None:
+        """
+        Release any resources held by the adapter (HTTP connection pools etc.).
+
+        Deliberately concrete, not abstract: adapters that hold no client are
+        correct to do nothing here, so subclasses should not be forced to
+        implement it. Adapters holding a client override it. Callers must
+        invoke this, since one adapter is constructed per poll cycle.
+        """
+        return None
+
     def normalize_status(self, platform_status: str) -> str:
         """
         Map platform-specific status to normalized status.

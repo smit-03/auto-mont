@@ -12,10 +12,9 @@ from app.schemas.integration import (
     IntegrationUpdate,
 )
 from app.schemas.monitor import MonitorCreate, MonitorRead, MonitorStatus, MonitorUpdate
-from app.schemas.workspace import WorkspaceCreate, WorkspaceRead, WorkspaceUpdate
+from app.schemas.workspace import WorkspaceRead, WorkspaceUpdate
 
 __all__ = [
-    "WorkspaceCreate",
     "WorkspaceRead",
     "WorkspaceUpdate",
     "IntegrationCreate",

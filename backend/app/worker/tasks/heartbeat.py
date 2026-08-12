@@ -5,13 +5,15 @@ Task 15: Heartbeat engine + /ping/{token} public endpoint
 Task 21: Celery beat schedule (heartbeat check 1min)
 """
 
+import uuid
+
 from celery import Task, shared_task
 from sqlalchemy import select
 
 from app.core.logging import get_logger
 from app.database import get_session_factory
-from app.models.alert import Alert
 from app.models.monitor import Monitor
+from app.services.alerts import build_dedup_key, record_alert
 from app.services.heartbeat.engine import HeartbeatEngine
 from app.services.notifications.dispatcher import NotificationDispatcher
 
@@ -53,40 +55,41 @@ async def check_all_monitors_async() -> dict:
         try:
             alert = await engine.check_monitor(monitor)
             if alert:
-                # Create alert record
-                db_alert = Alert(
-                    workspace_id=alert["workspace_id"],
-                    monitor_id=alert["monitor_id"],
-                    severity=alert["severity"],
-                    category=alert["category"],
-                    title=alert["title"],
-                    description=alert["description"],
-                    root_cause=alert["root_cause"],
-                    suggested_fix=alert["suggested_fix"],
-                )
+                # One incident per monitor outage, not one row per check. This
+                # loop runs every 60s; without dedup at this layer a monitor
+                # that stays down wrote an alert row every minute indefinitely.
+                dedup_key = build_dedup_key("monitor", monitor.id, alert["category"], "miss")
 
                 # Persist the alert record in its own transaction first, so a
                 # notification failure below cannot roll back the alert row.
                 async with get_session_factory().begin() as session:
-                    session.add(db_alert)
-                    await session.flush()
+                    recorded = await record_alert(
+                        session,
+                        workspace_id=uuid.UUID(alert["workspace_id"]),
+                        dedup_key=dedup_key,
+                        monitor_id=uuid.UUID(alert["monitor_id"]),
+                        severity=alert["severity"],
+                        category=alert["category"],
+                        title=alert["title"],
+                        description=alert["description"],
+                        root_cause=alert["root_cause"],
+                        suggested_fix=alert["suggested_fix"],
+                    )
                     alert_payload = {
-                        "id": str(db_alert.id),
-                        "workspace_id": str(db_alert.workspace_id),
-                        "title": db_alert.title,
-                        "description": db_alert.description,
-                        "severity": db_alert.severity,
-                        "suggested_fix": db_alert.suggested_fix,
+                        "id": str(recorded.id),
+                        "workspace_id": alert["workspace_id"],
+                        "title": alert["title"],
+                        "description": alert["description"],
+                        "severity": alert["severity"],
+                        "suggested_fix": alert["suggested_fix"],
                     }
 
                 # Send notification separately — failure here is logged by the
                 # dispatcher and must not discard the already-committed alert.
-                await dispatcher.send_alert(
-                    alert=alert_payload,
-                    dedup_key=f"monitor:{monitor.id}:{alert['category']}:miss",
-                )
+                await dispatcher.send_alert(alert=alert_payload, dedup_key=dedup_key)
 
-                results["missed"] += 1
+                if recorded.is_new:
+                    results["missed"] += 1
 
         except Exception as e:
             logger.error(

@@ -9,7 +9,7 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 from app.core.logging import get_logger
-from app.core.security import CredentialEncryption
+from app.core.security import CredentialEncryption, get_credential_encryption
 
 if TYPE_CHECKING:
     from app.models.credential import Credential
@@ -21,8 +21,15 @@ CRITICAL_HOURS = 6  # Critical alert 6 hours before expiry
 
 
 def get_vault() -> "CredentialVault":
-    """Get the global credential vault instance."""
-    return CredentialVault(CredentialEncryption(bytes.fromhex("0" * 64)))
+    """
+    Get the credential vault, keyed by the configured master key.
+
+    This MUST use the same key source as `get_credential_encryption()` (used
+    for integration API keys). A hardcoded key here would encrypt OAuth tokens
+    under a publicly-known constant, making the ciphertext in `credentials`
+    worthless as protection.
+    """
+    return CredentialVault(get_credential_encryption())
 
 
 class CredentialVault:

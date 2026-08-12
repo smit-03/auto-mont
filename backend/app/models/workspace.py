@@ -54,31 +54,43 @@ class Workspace(Base):
         nullable=True,
     )
 
-    # Relationships
+    # Relationships.
+    #
+    # lazy="raise" on every relationship, deliberately. These were all
+    # lazy="selectin", which meant get_current_workspace() — a dependency on
+    # every authenticated request — eagerly loaded this workspace's entire
+    # execution history, plus all alerts, integrations, monitors and
+    # credentials, to serve requests that need none of them. Worse, the eager
+    # loading was mutually recursive: loading an Execution loaded its Workspace,
+    # which loaded all of that workspace's Executions.
+    #
+    # Relationships must now be requested explicitly per query with
+    # selectinload(). Accessing one that wasn't loaded raises immediately
+    # instead of silently emitting N queries.
     integrations: Mapped[list["Integration"]] = relationship(
         "Integration",
         back_populates="workspace",
-        lazy="selectin",
+        lazy="raise",
     )
     executions: Mapped[list["Execution"]] = relationship(
         "Execution",
         back_populates="workspace",
-        lazy="selectin",
+        lazy="raise",
     )
     monitors: Mapped[list["Monitor"]] = relationship(
         "Monitor",
         back_populates="workspace",
-        lazy="selectin",
+        lazy="raise",
     )
     credentials: Mapped[list["Credential"]] = relationship(
         "Credential",
         back_populates="workspace",
-        lazy="selectin",
+        lazy="raise",
     )
     alerts: Mapped[list["Alert"]] = relationship(
         "Alert",
         back_populates="workspace",
-        lazy="selectin",
+        lazy="raise",
     )
 
     def __repr__(self) -> str:

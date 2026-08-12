@@ -6,7 +6,17 @@ import uuid
 from datetime import datetime
 from typing import TYPE_CHECKING
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Index, Integer, String, Text, func
+from sqlalchemy import (
+    Boolean,
+    DateTime,
+    ForeignKey,
+    Index,
+    Integer,
+    String,
+    Text,
+    UniqueConstraint,
+    func,
+)
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -76,16 +86,27 @@ class Execution(Base):
     workspace: Mapped["Workspace"] = relationship(
         "Workspace",
         back_populates="executions",
-        lazy="selectin",
+        lazy="raise",
     )
     integration: Mapped["Integration"] = relationship(
         "Integration",
         back_populates="executions",
-        lazy="selectin",
+        lazy="raise",
     )
 
     # Indexes
     __table_args__ = (
+        # The polling upsert does SELECT-then-INSERT, which races: two concurrent
+        # polls of the same integration can both see "absent" and both insert.
+        # This constraint is the actual guarantee. It must be declared here and
+        # not only in the Alembic migration — init_db() calls create_all() in
+        # non-production, so a model-only omission means dev and prod run
+        # different schemas, and dev is the one missing the protection.
+        UniqueConstraint(
+            "integration_id",
+            "platform_run_id",
+            name="uq_executions_integration_run_id",
+        ),
         Index(
             "idx_executions_workspace_created",
             "workspace_id",
@@ -102,8 +123,6 @@ class Execution(Base):
             "idx_executions_status", "workspace_id", "status", postgresql_where=deleted_at.is_(None)
         ),
         Index("idx_executions_payload_gin", "raw_payload", postgresql_using="gin"),
-        # Unique constraint
-        # Note: unique constraint on (integration_id, platform_run_id) is defined via __table_args__
     )
 
     def __repr__(self) -> str:

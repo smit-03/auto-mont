@@ -10,8 +10,8 @@ from sqlalchemy import select, update
 
 from app.core.logging import get_logger
 from app.database import get_session_factory
-from app.models.alert import Alert
 from app.models.credential import Credential
+from app.services.alerts import build_dedup_key, record_alert
 from app.services.credential_vault.vault import get_vault
 from app.services.notifications.dispatcher import NotificationDispatcher
 
@@ -55,38 +55,47 @@ async def check_all_credentials_async() -> dict:
             alerts = await vault.check_credential(credential)
             if alerts:
                 for alert_data in alerts:
-                    db_alert = Alert(
-                        workspace_id=credential.workspace_id,
-                        credential_id=credential.id,
-                        severity=alert_data["severity"],
-                        category=alert_data["category"],
-                        title=alert_data["title"],
-                        description=alert_data["description"],
-                        suggested_fix=alert_data.get("suggested_fix"),
+                    # Include the severity in the incident identity: a credential
+                    # moving from "expiring soon" (warning) to "expired"
+                    # (critical) is a genuine escalation and deserves its own
+                    # incident and its own notification, not a silent counter
+                    # bump on the earlier warning.
+                    dedup_key = build_dedup_key(
+                        "credential",
+                        credential.id,
+                        alert_data["category"],
+                        alert_data["severity"],
                     )
 
                     # Persist the alert record first in its own transaction, so a
                     # notification failure below cannot roll back the alert row.
                     async with get_session_factory().begin() as session:
-                        session.add(db_alert)
-                        await session.flush()
+                        recorded = await record_alert(
+                            session,
+                            workspace_id=credential.workspace_id,
+                            dedup_key=dedup_key,
+                            credential_id=credential.id,
+                            severity=alert_data["severity"],
+                            category=alert_data["category"],
+                            title=alert_data["title"],
+                            description=alert_data["description"],
+                            suggested_fix=alert_data.get("suggested_fix"),
+                        )
                         alert_payload = {
-                            "id": str(db_alert.id),
-                            "workspace_id": str(db_alert.workspace_id),
-                            "title": db_alert.title,
-                            "description": db_alert.description,
-                            "severity": db_alert.severity,
-                            "suggested_fix": db_alert.suggested_fix,
+                            "id": str(recorded.id),
+                            "workspace_id": str(credential.workspace_id),
+                            "title": alert_data["title"],
+                            "description": alert_data["description"],
+                            "severity": alert_data["severity"],
+                            "suggested_fix": alert_data.get("suggested_fix"),
                         }
 
                     # Send notification separately — failure must not discard the
                     # already-committed alert record.
-                    await dispatcher.send_alert(
-                        alert=alert_payload,
-                        dedup_key=f"credential:{credential.id}:{alert_data['category']}",
-                    )
+                    await dispatcher.send_alert(alert=alert_payload, dedup_key=dedup_key)
 
-                    results["alerts_generated"] += 1
+                    if recorded.is_new:
+                        results["alerts_generated"] += 1
 
                 # Determine new credential status from generated alerts
                 new_status = credential.status

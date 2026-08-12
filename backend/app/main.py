@@ -83,9 +83,11 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
     # Shutdown
     logger.info("application.shutting_down")
+    from app.core.redis import close_redis_client
     from app.database import close_db
 
     await close_db()
+    await close_redis_client()
     logger.info("application.shutdown_complete")
 
 
@@ -104,7 +106,7 @@ def create_app() -> FastAPI:
     # CORS Middleware
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=settings.CORS_ORIGINS,
+        allow_origins=settings.cors_origins_list,
         allow_credentials=True,
         allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
         allow_headers=["*"],
@@ -246,38 +248,83 @@ def create_app() -> FastAPI:
     # Public Heartbeat Ping Endpoint (no auth required)
 
     @app.post("/ping/{ping_token}", tags=["Heartbeat"], include_in_schema=False)
-    async def heartbeat_ping(ping_token: str) -> JSONResponse:
+    async def heartbeat_ping(ping_token: str, request: Request) -> JSONResponse:
         """
         Public heartbeat ping endpoint.
 
-        Workflows call this endpoint to signal they are alive.
+        Workflows call this endpoint to signal they are alive. Unauthenticated
+        by design — the token is the credential — so it is rate limited per
+        token and per client IP.
         """
+        from datetime import datetime
+
         from sqlalchemy import select
 
+        from app.core.redis import rate_limit
         from app.database import get_session
         from app.models.monitor import Monitor
+        from app.services.alerts import resolve_alerts_for_monitor
+
+        logger = get_logger(__name__)
+
+        # Rate limit *before* the database lookup: on a public endpoint the
+        # query itself is the resource being abused.
+        client_ip = request.client.host if request.client else "unknown"
+        for key, limit in (
+            (f"ratelimit:ping:token:{ping_token}", settings.PING_RATE_LIMIT_PER_TOKEN),
+            (f"ratelimit:ping:ip:{client_ip}", settings.PING_RATE_LIMIT_PER_IP),
+        ):
+            allowed, retry_after = await rate_limit(
+                key, limit, settings.PING_RATE_LIMIT_WINDOW_S
+            )
+            if not allowed:
+                return JSONResponse(
+                    status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                    content={
+                        "error": {
+                            "code": "RATE_LIMITED",
+                            "message": "Too many pings for this monitor",
+                        }
+                    },
+                    headers={"Retry-After": str(retry_after)},
+                )
 
         async with get_session() as session:
             result = await session.execute(
                 select(Monitor).where(
-                    Monitor.ping_url.contains(ping_token),
+                    Monitor.ping_token == ping_token,
                     Monitor.deleted_at.is_(None),
                 )
             )
             monitor = result.scalar_one_or_none()
 
             if not monitor:
+                # Deliberately identical to the response for a well-formed but
+                # unknown token: do not confirm whether a token exists.
                 return JSONResponse(
                     status_code=404,
                     content={"error": "Monitor not found or token invalid"},
                 )
 
-            from datetime import datetime
-
             monitor.last_ping_at = datetime.now(UTC)
             monitor.last_status = "healthy"
 
+            # The monitor is demonstrably alive, so any open incident for it is
+            # over. This is required for incident dedup to behave correctly:
+            # the partial unique index only permits one OPEN incident per
+            # dedup key, so without closing it here a monitor that failed,
+            # recovered, and failed again would fold the second outage into the
+            # first and never re-notify.
+            resolved = await resolve_alerts_for_monitor(session, monitor.id)
+
             await session.commit()
+
+            if resolved:
+                logger.info(
+                    "heartbeat.recovered",
+                    monitor_id=str(monitor.id),
+                    alerts_resolved=resolved,
+                )
 
             return JSONResponse(
                 status_code=200,

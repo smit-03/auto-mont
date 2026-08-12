@@ -6,6 +6,7 @@ Handles deduplication, channel routing, and delivery status tracking.
 
 from __future__ import annotations
 
+import uuid
 from typing import TYPE_CHECKING
 
 from app.config import settings
@@ -29,9 +30,16 @@ class NotificationDispatcher:
     - Delivery status tracking
     """
 
-    def __init__(self, cache: RedisCache | None = None):
+    def __init__(
+        self,
+        cache: RedisCache | None = None,
+        channels: list[tuple[str, str]] | None = None,
+    ):
         self._cache: RedisCache | None = cache
         self.slack: SlackNotifier | None = None  # Lazy-loaded
+        # Explicit (display_name, destination_url) pairs, bypassing lookup.
+        # Test seam only — production always resolves per workspace.
+        self._channels_override = channels
 
     async def _get_cache(self) -> RedisCache:
         if self._cache is None:
@@ -45,42 +53,133 @@ class NotificationDispatcher:
             self.slack = SlackNotifier()
         return self.slack
 
+    async def _resolve_channels(
+        self, workspace_id: str, severity: str
+    ) -> list[tuple[str, str]]:
+        """
+        Return (display_name, destination_url) for this workspace's channels.
+
+        Destinations are decrypted here and never cached — they are credentials.
+        A channel whose destination fails to decrypt is skipped and logged
+        rather than aborting delivery to the workspace's other channels.
+        """
+        if self._channels_override is not None:
+            return self._channels_override
+
+        from sqlalchemy import select
+
+        from app.core.security import get_credential_encryption
+        from app.database import get_session_factory
+        from app.models.channel import SEVERITY_ORDER, NotificationChannel
+
+        threshold = SEVERITY_ORDER.get(severity, 0)
+
+        async with get_session_factory().begin() as session:
+            result = await session.execute(
+                select(NotificationChannel).where(
+                    NotificationChannel.workspace_id == uuid.UUID(workspace_id),
+                    NotificationChannel.deleted_at.is_(None),
+                    NotificationChannel.enabled.is_(True),
+                    NotificationChannel.channel_type == "slack",
+                )
+            )
+            rows = list(result.scalars().all())
+
+        encryption = get_credential_encryption()
+        resolved: list[tuple[str, str]] = []
+        for channel in rows:
+            if SEVERITY_ORDER.get(channel.min_severity, 0) > threshold:
+                continue
+            try:
+                destination = encryption.decrypt(
+                    channel.destination_enc, str(channel.workspace_id)
+                )
+            except Exception as e:
+                logger.error(
+                    "notification.channel_decrypt_failed",
+                    channel_id=str(channel.id),
+                    error=str(e),
+                )
+                continue
+            resolved.append((channel.display_name, destination))
+
+        return resolved
+
     async def send_alert(
         self,
         alert: dict,
         dedup_key: str | None = None,
     ) -> bool:
         """
-        Send an alert to configured channels.
+        Send an alert to the alert's own workspace's channels.
 
         Returns True if at least one channel delivered successfully.
         """
+        workspace_id = alert.get("workspace_id")
+        if not workspace_id:
+            logger.error("notification.no_workspace", alert_id=alert.get("id"))
+            return False
+
         if dedup_key:
-            if await self._is_duplicate(dedup_key, alert.get("workspace_id")):
+            if await self._is_duplicate(dedup_key, workspace_id):
                 logger.info("notification.deduped", key=dedup_key)
                 return True
+
+        severity = alert.get("severity", "warning")
+        channels = await self._resolve_channels(workspace_id, severity)
+
+        if not channels:
+            # No cross-workspace fallback in production. Falling back to a
+            # global webhook is exactly the cross-tenant leak this replaced:
+            # one workspace's workflow names and error messages would be
+            # delivered into a channel another customer can read.
+            if settings.ENVIRONMENT in ("development", "test") and settings.SLACK_WEBHOOK_URL:
+                logger.warning(
+                    "notification.dev_fallback_channel",
+                    workspace_id=workspace_id,
+                    detail="No channel configured; using SLACK_WEBHOOK_URL (non-production only)",
+                )
+                channels = [("dev-fallback", settings.SLACK_WEBHOOK_URL)]
+            else:
+                logger.error(
+                    "notification.no_channels_configured",
+                    workspace_id=workspace_id,
+                    alert_id=alert.get("id"),
+                    detail="Alert recorded but undeliverable — workspace has no channel",
+                )
+                return False
 
         success = False
         slack_notifier = await self._get_slack_notifier()
 
-        if alert.get("workspace_id"):
+        for display_name, destination in channels:
             try:
                 delivered = await slack_notifier.send_alert(
                     title=alert["title"],
                     description=alert["description"],
                     severity=alert["severity"],
                     suggested_fix=alert.get("suggested_fix"),
+                    webhook_url=destination,
                 )
                 if delivered:
                     success = True
-                    logger.info("notification.slack_delivered", alert_id=alert.get("id"))
+                    logger.info(
+                        "notification.slack_delivered",
+                        alert_id=alert.get("id"),
+                        channel=display_name,
+                    )
             except Exception as e:
-                logger.error("notification.slack_failed", alert_id=alert.get("id"), error=str(e))
+                logger.error(
+                    "notification.slack_failed",
+                    alert_id=alert.get("id"),
+                    channel=display_name,
+                    error=str(e),
+                )
 
         # Only suppress future duplicates once delivery actually succeeded, so a
         # transient failure does not silence this alert for the dedup window.
         if success and dedup_key:
-            await self._mark_sent(dedup_key, alert.get("workspace_id"))
+            await self._mark_sent(dedup_key, workspace_id)
 
         return success
 

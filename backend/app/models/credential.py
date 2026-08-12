@@ -74,11 +74,11 @@ class Credential(Base):
     workspace: Mapped["Workspace"] = relationship(
         "Workspace",
         back_populates="credentials",
-        lazy="selectin",
+        lazy="raise",
     )
     integration: Mapped[Optional["Integration"]] = relationship(
         "Integration",
-        lazy="selectin",
+        lazy="raise",
     )
 
     # Indexes

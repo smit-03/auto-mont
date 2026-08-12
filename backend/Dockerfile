@@ -13,27 +13,31 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN python -m venv /opt/venv
 ENV PATH="/opt/venv/bin:$PATH"
 
-# Install dependencies
+# Install dependencies (runtime only — dev extras carry ruff/mypy/ipdb and
+# have no place in a production image)
 COPY pyproject.toml ./
 RUN pip install --no-cache-dir --upgrade pip setuptools wheel && \
-    pip install --no-cache-dir ".[dev]" && \
+    pip install --no-cache-dir "." && \
     pip cache purge
 
 # Runtime stage
-FROM python:3.12-alpine AS runtime
+# MUST stay on the same libc as the builder. The builder is Debian/glibc
+# (python:3.12-slim); an Alpine/musl runtime cannot load the compiled wheels
+# (asyncpg, cryptography, pydantic-core) copied over in /opt/venv.
+FROM python:3.12-slim AS runtime
 
 # Install runtime dependencies
-RUN apk add --no-cache \
-    libpq \
-    && rm -rf /var/cache/apk/*
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libpq5 \
+    && rm -rf /var/lib/apt/lists/*
 
 # Copy virtual environment from builder
 COPY --from=builder /opt/venv /opt/venv
 ENV PATH="/opt/venv/bin:$PATH"
 
-# Create non-root user
-RUN addgroup -g 1000 wrp && \
-    adduser -u 1000 -G wrp -s /bin/sh -D wrp
+# Create non-root user (Debian shadow-utils syntax, not busybox)
+RUN groupadd -g 1000 wrp && \
+    useradd -u 1000 -g wrp -s /bin/sh -m wrp
 
 WORKDIR /app
 

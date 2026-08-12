@@ -16,9 +16,9 @@ from app.core.exceptions import IntegrationError
 from app.core.logging import get_logger
 from app.core.security import get_credential_encryption
 from app.database import get_session_factory
-from app.models.alert import Alert
 from app.models.execution import Execution
 from app.models.integration import Integration
+from app.services.alerts import build_dedup_key, record_alert
 from app.services.diagnostic.rule_engine import DiagnosticRuleEngine
 from app.services.notifications.dispatcher import NotificationDispatcher
 from app.services.sentinel.base_adapter import BaseAdapter, NormalizedExecution
@@ -74,6 +74,8 @@ def poll_all_integrations(self: Task) -> dict:
     from app.worker.loop import run_async
 
     async def _poll() -> dict:
+        now = datetime.now(UTC)
+
         async with get_session_factory().begin() as session:
             result = await session.execute(
                 select(Integration).where(
@@ -82,7 +84,23 @@ def poll_all_integrations(self: Task) -> dict:
                     Integration.status.in_(["active", "error"]),
                 )
             )
-            integrations = result.scalars().all()
+            candidates = result.scalars().all()
+
+        # Respect each integration's configured poll_interval_s. Without this the
+        # setting is collected in the UI, validated by the API, stored on the row
+        # — and then ignored, because this beat task polls everything on one
+        # global schedule.
+        #
+        # Effective granularity is the beat interval: an integration is polled on
+        # the first tick at or after its interval elapses, so a 90s interval on a
+        # 60s beat polls at ~120s. Filtering in Python is fine at current scale;
+        # push it into the WHERE clause when the integration count grows.
+        integrations = [
+            i
+            for i in candidates
+            if i.last_polled_at is None
+            or (now - i.last_polled_at).total_seconds() >= i.poll_interval_s
+        ]
 
         results = {"total": len(integrations), "polled": 0, "errors": 0}
 
@@ -158,53 +176,71 @@ async def poll_integration_executions_async(integration: Integration) -> int:
     # post-commit so a notification failure can't roll back ingested rows (F6).
     to_diagnose: list[NormalizedExecution] = []
 
-    async with get_session_factory().begin() as session:
-        async for normalized in adapter.list_recent_executions(since=since, limit=100):
-            # Upsert execution
-            stmt = select(Execution).where(
-                Execution.integration_id == integration.id,
-                Execution.platform_run_id == normalized.platform_run_id,
-            )
-            result = await session.execute(stmt)
-            existing = result.scalar_one_or_none()
-
-            if existing:
-                # Update existing
-                for attr in ["status", "finished_at", "duration_ms", "raw_payload"]:
-                    setattr(existing, attr, getattr(normalized, attr, None))
-            else:
-                # Create new
-                execution = Execution(
-                    workspace_id=integration.workspace_id,
-                    integration_id=integration.id,
-                    platform=integration.platform,
-                    platform_run_id=normalized.platform_run_id,
-                    workflow_id=normalized.workflow_id,
-                    workflow_name=normalized.workflow_name,
-                    status=normalized.status,
-                    started_at=normalized.started_at,
-                    finished_at=normalized.finished_at,
-                    duration_ms=normalized.duration_ms,
-                    node_count=normalized.node_count,
-                    items_processed=normalized.items_processed,
-                    error_message=normalized.error_message,
-                    error_node=normalized.error_node,
-                    raw_payload=normalized.raw_payload,
+    try:
+        async with get_session_factory().begin() as session:
+            async for normalized in adapter.list_recent_executions(since=since, limit=100):
+                # Upsert execution
+                stmt = select(Execution).where(
+                    Execution.integration_id == integration.id,
+                    Execution.platform_run_id == normalized.platform_run_id,
                 )
-                session.add(execution)
-                # Only diagnose brand-new executions to avoid re-alerting on
-                # every poll for the same run.
-                to_diagnose.append(normalized)
+                result = await session.execute(stmt)
+                existing = result.scalar_one_or_none()
 
-            fetched_count += 1
+                if existing:
+                    # Refresh every field that can change as a run progresses.
+                    # error_message / items_processed were previously omitted, so
+                    # a run first seen as "running" kept a NULL error message
+                    # forever once it failed.
+                    for attr in [
+                        "status",
+                        "finished_at",
+                        "duration_ms",
+                        "node_count",
+                        "items_processed",
+                        "error_message",
+                        "error_node",
+                        "raw_payload",
+                    ]:
+                        setattr(existing, attr, getattr(normalized, attr, None))
+                else:
+                    # Create new
+                    execution = Execution(
+                        workspace_id=integration.workspace_id,
+                        integration_id=integration.id,
+                        platform=integration.platform,
+                        platform_run_id=normalized.platform_run_id,
+                        workflow_id=normalized.workflow_id,
+                        workflow_name=normalized.workflow_name,
+                        status=normalized.status,
+                        started_at=normalized.started_at,
+                        finished_at=normalized.finished_at,
+                        duration_ms=normalized.duration_ms,
+                        node_count=normalized.node_count,
+                        items_processed=normalized.items_processed,
+                        error_message=normalized.error_message,
+                        error_node=normalized.error_node,
+                        raw_payload=normalized.raw_payload,
+                    )
+                    session.add(execution)
+                    # Only diagnose brand-new executions to avoid re-alerting on
+                    # every poll for the same run.
+                    to_diagnose.append(normalized)
 
-        # Update last polled timestamp (explicit UPDATE — integration may be
-        # detached from this session, so mutating the attribute would not persist)
-        await session.execute(
-            update(Integration)
-            .where(Integration.id == integration.id)
-            .values(last_polled_at=datetime.now(UTC))
-        )
+                fetched_count += 1
+
+            # Update last polled timestamp (explicit UPDATE — integration may be
+            # detached from this session, so mutating the attribute would not
+            # persist)
+            await session.execute(
+                update(Integration)
+                .where(Integration.id == integration.id)
+                .values(last_polled_at=datetime.now(UTC))
+            )
+    finally:
+        # One adapter (and one httpx connection pool) is built per poll cycle;
+        # without this the worker leaks a pool every beat tick.
+        await adapter.close()
 
     # Diagnose newly-ingested executions and dispatch alerts for any matches.
     alerts_generated = await _diagnose_and_alert(integration, to_diagnose)
@@ -245,35 +281,41 @@ async def _diagnose_and_alert(
         severity = _CATEGORY_SEVERITY.get(match.category, "warning")
         title = f"{match.category.title()} failure: {normalized.workflow_name or normalized.workflow_id}"
 
-        db_alert = Alert(
-            workspace_id=integration.workspace_id,
-            integration_id=integration.id,
-            severity=severity,
-            category=match.category,
-            title=title,
-            description=match.root_cause,
-            root_cause=match.root_cause,
-            suggested_fix=match.suggested_fix,
+        # Incident identity excludes platform_run_id. Including it — as this
+        # previously did — made every execution its own incident, so the same
+        # recurring failure never deduplicated against itself.
+        dedup_key = build_dedup_key(
+            "execution", integration.id, match.category, match.rule_id
         )
 
         # Persist the alert record in its own transaction first (F6).
         async with get_session_factory().begin() as session:
-            session.add(db_alert)
-            await session.flush()
+            recorded = await record_alert(
+                session,
+                workspace_id=integration.workspace_id,
+                dedup_key=dedup_key,
+                integration_id=integration.id,
+                severity=severity,
+                category=match.category,
+                title=title,
+                description=match.root_cause,
+                root_cause=match.root_cause,
+                suggested_fix=match.suggested_fix,
+            )
             alert_payload = {
-                "id": str(db_alert.id),
-                "workspace_id": str(db_alert.workspace_id),
-                "title": db_alert.title,
-                "description": db_alert.description,
-                "severity": db_alert.severity,
-                "suggested_fix": db_alert.suggested_fix,
+                "id": str(recorded.id),
+                "workspace_id": str(integration.workspace_id),
+                "title": title,
+                "description": match.root_cause,
+                "severity": severity,
+                "suggested_fix": match.suggested_fix,
             }
 
         # Send notification separately — failure must not discard the alert row.
-        await dispatcher.send_alert(
-            alert=alert_payload,
-            dedup_key=f"execution:{integration.id}:{normalized.platform_run_id}:{match.rule_id}",
-        )
-        alerts_generated += 1
+        # The dispatcher's Redis throttle decides whether an ongoing incident
+        # re-notifies; the row above is already durable either way.
+        await dispatcher.send_alert(alert=alert_payload, dedup_key=dedup_key)
+        if recorded.is_new:
+            alerts_generated += 1
 
     return alerts_generated

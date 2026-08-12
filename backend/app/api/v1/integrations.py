@@ -3,7 +3,7 @@ Integration endpoints - CRUD operations for platform connections.
 """
 
 import uuid
-from datetime import datetime
+from datetime import UTC, datetime
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import select
@@ -148,7 +148,7 @@ async def delete_integration(
     if not integration:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Integration not found")
 
-    integration.deleted_at = datetime.utcnow()
+    integration.deleted_at = datetime.now(UTC)
     integration.status = "paused"
     await session.commit()
 
@@ -195,6 +195,8 @@ async def test_integration(
             connected=False,
             error_message=str(e),
         )
+    finally:
+        await adapter.close()
 
 
 @router.post("/{integration_id}/poll")

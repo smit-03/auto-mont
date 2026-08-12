@@ -1,0 +1,55 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "API",
+            "type": "shell",
+            "command": "cd backend && source .venv/Scripts/activate && uvicorn app.main:app --reload --port 8000",
+            "isBackground": true,
+            "presentation": {
+                "panel": "shared",
+                "reveal": "always"
+            }
+        },
+        {
+            "label": "Worker",
+            "type": "shell",
+            "command": "cd backend && source .venv/Scripts/activate && celery -A app.worker.celery_app worker --loglevel=info -Q polling,beat --pool=solo",
+            "isBackground": true,
+            "presentation": {
+                "panel": "shared",
+                "reveal": "always"
+            }
+        },
+        {
+            "label": "Beat",
+            "type": "shell",
+            "command": "cd backend && source .venv/Scripts/activate && celery -A app.worker.celery_app beat --loglevel=info",
+            "isBackground": true,
+            "presentation": {
+                "panel": "shared",
+                "reveal": "always"
+            }
+        },
+        {
+            "label": "Frontend",
+            "type": "shell",
+            "command": "cd frontend && npm run dev",
+            "isBackground": true,
+            "presentation": {
+                "panel": "shared",
+                "reveal": "always"
+            }
+        },
+        {
+            "label": "Start All",
+            "dependsOrder": "parallel",
+            "dependsOn": [
+                "API",
+                "Worker",
+                "Beat",
+                "Frontend"
+            ]
+        }
+    ]
+}

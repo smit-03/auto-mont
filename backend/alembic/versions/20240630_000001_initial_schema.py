@@ -19,8 +19,10 @@ depends_on = None
 def upgrade() -> None:
     """Create core tables for Phase 1."""
 
-    # Extensions
-    op.execute("CREATE EXTENSION IF NOT EXISTS pgvector")
+    # Extensions.
+    # The extension is named "vector"; "pgvector" is the project name and is not
+    # a valid extension identifier — CREATE EXTENSION pgvector errors out.
+    op.execute("CREATE EXTENSION IF NOT EXISTS vector")
 
     # Workspaces table
     op.create_table(
@@ -68,7 +70,10 @@ def upgrade() -> None:
         sa.Column("poll_interval_s", sa.Integer(), nullable=False, server_default="60"),
         sa.Column("last_polled_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column("status", sa.Text(), nullable=False, server_default="active"),
-        sa.Column("metadata", postgresql.JSONB(), nullable=False, server_default="{}"),
+        # Named "config", not "metadata": `metadata` collides with the reserved
+        # attribute on SQLAlchemy's declarative base, and the Integration model
+        # maps this column as `config`.
+        sa.Column("config", postgresql.JSONB(), nullable=False, server_default="{}"),
         sa.Column(
             "created_at",
             sa.DateTime(timezone=True),
@@ -127,6 +132,9 @@ def upgrade() -> None:
             nullable=False,
             server_default=sa.text("now()"),
         ),
+        # Required by idx_executions_status below, and mapped on the Execution
+        # model. Its absence made this migration fail on index creation.
+        sa.Column("deleted_at", sa.DateTime(timezone=True), nullable=True),
     )
 
     op.create_index(
@@ -362,19 +370,17 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    """Drop all tables."""
+    """
+    Drop all tables, children before parents.
+
+    No explicit drop_index calls: Postgres drops a table's indexes and
+    constraints with the table. The previous version dropped several indexes
+    *after* their table, which fails because the index no longer exists.
+    """
     op.drop_table("hitl_requests")
     op.drop_table("alerts")
-    op.drop_index("idx_alerts_workspace_created", table_name="alerts")
-    op.drop_index("idx_alerts_unresolved", table_name="alerts")
-    op.drop_index("idx_credentials_expiry", table_name="credentials")
     op.drop_table("credentials")
     op.drop_table("monitors")
     op.drop_table("executions")
-    op.drop_index("idx_executions_workspace_created", table_name="executions")
-    op.drop_index("idx_executions_integration_created", table_name="executions")
-    op.drop_index("idx_executions_status", table_name="executions")
-    op.drop_index("idx_executions_payload_gin", table_name="executions")
-    op.drop_index("idx_integrations_workspace", table_name="integrations")
     op.drop_table("integrations")
     op.drop_table("workspaces")

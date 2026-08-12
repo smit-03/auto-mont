@@ -1,3 +1,8 @@
+# Render deployment config.
+#
+# NOTE: `services:` must appear exactly once. This file previously declared it
+# twice; YAML keeps only the last occurrence, so the api and worker services
+# were silently dropped and only Redis would have been provisioned.
 services:
   - type: web
     name: wrp-api
@@ -7,6 +12,8 @@ services:
     plan: free
     healthCheckPath: /health
     envVars:
+      - key: ENVIRONMENT
+        value: production
       - key: DATABASE_URL
         fromDatabase:
           name: wrp-db
@@ -16,9 +23,18 @@ services:
           type: redis
           name: wrp-redis
           property: connectionString
+      # Must be byte-identical across api and worker: the api encrypts
+      # credentials and the worker decrypts them. `generateValue: true` would
+      # mint a DIFFERENT value per service (and a non-hex one, which fails the
+      # 64-hex-char validator in config.py), so it is set manually instead.
       - key: CREDENTIAL_MASTER_KEY
-        generateValue: true
+        sync: false
       - key: JWT_SECRET_KEY
+        sync: false
+      # Required: Clerk JWKS discovery derives from this issuer URL.
+      - key: JWT_ISSUER
+        sync: false
+      - key: JWT_AUDIENCE
         sync: false
       - key: CLERK_SECRET_KEY
         sync: false
@@ -29,6 +45,8 @@ services:
       - key: SLACK_SIGNING_SECRET
         sync: false
       - key: SLACK_WEBHOOK_URL
+        sync: false
+      - key: CORS_ORIGINS
         sync: false
       - key: ENABLE_LLM_JUDGE
         value: "false"
@@ -45,6 +63,8 @@ services:
     plan: free
     startCommand: "celery -A app.worker.celery_app worker --loglevel=info -B"
     envVars:
+      - key: ENVIRONMENT
+        value: production
       - key: DATABASE_URL
         fromDatabase:
           name: wrp-db
@@ -55,8 +75,12 @@ services:
           name: wrp-redis
           property: connectionString
       - key: CREDENTIAL_MASTER_KEY
-        generateValue: true
+        sync: false
       - key: JWT_SECRET_KEY
+        sync: false
+      - key: JWT_ISSUER
+        sync: false
+      - key: JWT_AUDIENCE
         sync: false
       - key: CLERK_SECRET_KEY
         sync: false
@@ -69,16 +93,15 @@ services:
       - key: SLACK_WEBHOOK_URL
         sync: false
 
+  - type: redis
+    name: wrp-redis
+    plan: free
+    region: oregon
+    maxmemoryPolicy: allkeys-lru
+
 databases:
   - name: wrp-db
     plan: free
     databaseName: wrp
     user: wrp
     region: oregon
-
-services:
-  - type: redis
-    name: wrp-redis
-    plan: free
-    region: oregon
-    maxmemoryPolicy: allkeys-lru

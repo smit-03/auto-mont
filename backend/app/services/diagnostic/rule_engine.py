@@ -155,6 +155,10 @@ class DiagnosticRuleEngine:
         # Pre-compile regex patterns for faster matching
         self._compiled_rules: list[dict] = []
         self._fallback_rule: dict | None = None
+        # Looked up by match type, not by list position: the silent-failure
+        # check runs before the signature loop, and a positional lookup would
+        # silently select the wrong rule as soon as a rule is appended.
+        self._silent_rule: dict | None = None
         for rule in self.rules:
             compiled = rule.copy()
             if rule["match"] in ("contains", "contains_lower") and rule["pattern"]:
@@ -165,6 +169,8 @@ class DiagnosticRuleEngine:
             if rule["id"] == "UNKNOWN_001":
                 self._fallback_rule = compiled
             else:
+                if rule["match"] == "equals_zero_on_success":
+                    self._silent_rule = compiled
                 self._compiled_rules.append(compiled)
 
         if self._fallback_rule is None:
@@ -189,8 +195,12 @@ class DiagnosticRuleEngine:
         executions when no signature matches.
         """
         # Check for silent failure (items_processed == 0 with success status)
-        if execution.get("items_processed") == 0 and execution.get("status") == "success":
-            return self._apply_rule(self._compiled_rules[-1], execution)
+        if (
+            self._silent_rule is not None
+            and execution.get("items_processed") == 0
+            and execution.get("status") == "success"
+        ):
+            return self._apply_rule(self._silent_rule, execution)
 
         error_message = execution.get("error_message", "") or ""
         status = str(execution.get("status") or "").strip().lower()

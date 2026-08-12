@@ -89,15 +89,6 @@ async def get_current_workspace(
     return workspace
 
 
-async def get_workspace_id(
-    session: Annotated[AsyncSession, Depends(get_db_session)],
-) -> str:
-    """Extract workspace_id from session context or header."""
-    # In production, this would extract from JWT token
-    # For Phase 1 dev, we use a header override
-    return "dev-workspace-id"
-
-
 async def get_api_key(
     x_api_key: Annotated[str | None, Header()] = None,
 ) -> str | None:

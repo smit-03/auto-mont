@@ -13,12 +13,12 @@ The final test (test_production_task_end_to_end) calls the REAL production task
 poll_integration_executions_async, proving the D7 wiring — not in-test chaining.
 """
 
+import uuid
 from datetime import UTC, datetime
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from app.models.alert import Alert
 from app.services.diagnostic.rule_engine import DiagnosticRuleEngine
 from app.services.notifications.dispatcher import NotificationDispatcher
 from app.services.notifications.slack import SlackNotifier
@@ -27,6 +27,12 @@ from app.services.sentinel.n8n_adapter import N8NAdapter
 # Severity is not part of RuleMatch; the glue task derives it. Mirror that
 # mapping here so the alert handed to Slack is realistic.
 _CATEGORY_SEVERITY = {"auth": "critical", "api": "warning", "silent": "critical", "unknown": "warning"}
+
+# Alerts now fan out to the alert's own workspace's channels rather than one
+# global webhook. Injecting the channel list keeps these tests DB-free while
+# still driving the real resolution -> delivery path.
+_TEST_WEBHOOK = "https://hooks.slack.test/xxx"
+_TEST_CHANNELS = [("test-channel", _TEST_WEBHOOK)]
 
 
 class InMemoryCache:
@@ -94,32 +100,52 @@ def _mock_n8n_adapter(payload: dict) -> N8NAdapter:
     mock_response.json = MagicMock(return_value=payload)
     mock_client = MagicMock()
     mock_client.get = AsyncMock(return_value=mock_response)
+    # The poll task closes the adapter in a finally block, so the fake client
+    # must model aclose() as awaitable just like httpx.AsyncClient does.
+    mock_client.aclose = AsyncMock()
     adapter._client = mock_client  # bypass real httpx client creation
     return adapter
 
 
 class FakeSession:
-    """Minimal async session capturing added rows; no real DB required."""
+    """
+    Minimal async session; no real DB required.
 
-    def __init__(self, added: list) -> None:
+    Alerts are no longer written with session.add() — record_alert() issues an
+    INSERT ... ON CONFLICT so that incident dedup is atomic. This fake therefore
+    intercepts inserts against the alerts table, captures the bound values for
+    assertions, and returns a row shaped like the statement's RETURNING clause
+    (id, occurrence_count). occurrence_count=1 means "new incident", which is
+    what a fresh insert against an empty table would yield.
+    """
+
+    def __init__(self, added: list, alerts: list) -> None:
         self._added = added
+        self._alerts = alerts
         # No existing executions -> every polled run is treated as new.
         self._empty_result = MagicMock()
         self._empty_result.scalar_one_or_none = MagicMock(return_value=None)
 
-    async def execute(self, *_args, **_kwargs):
+    async def execute(self, stmt=None, *_args, **_kwargs):
+        table = getattr(stmt, "table", None)
+        if table is not None and getattr(table, "name", None) == "alerts":
+            try:
+                values = dict(stmt.compile().params)
+            except Exception:  # pragma: no cover - defensive
+                values = {}
+            self._alerts.append(values)
+            result = MagicMock()
+            result.first = MagicMock(return_value=(uuid.uuid4(), 1))
+            return result
         return self._empty_result
 
     def add(self, obj) -> None:
         self._added.append(obj)
 
     async def flush(self) -> None:
-        # Assign an id to any Alert so the payload build has one.
-        import uuid as _uuid
-
         for obj in self._added:
             if getattr(obj, "id", None) is None:
-                obj.id = _uuid.uuid4()
+                obj.id = uuid.uuid4()
 
 
 class FakeSessionFactory:
@@ -127,13 +153,14 @@ class FakeSessionFactory:
 
     def __init__(self) -> None:
         self.added: list = []
+        self.alerts: list[dict] = []
 
     def begin(self):  # noqa: ANN201 - async context manager
-        added = self.added
+        added, alerts = self.added, self.alerts
 
         class _Ctx:
             async def __aenter__(self_inner):
-                return FakeSession(added)
+                return FakeSession(added, alerts)
 
             async def __aexit__(self_inner, *exc):
                 return False
@@ -182,7 +209,7 @@ class TestPollToAlertToSlack:
 
         # 4. Dispatch: real dispatcher + real Slack Block Kit, mocked webhook POST.
         cache = InMemoryCache()
-        dispatcher = NotificationDispatcher(cache=cache)
+        dispatcher = NotificationDispatcher(cache=cache, channels=_TEST_CHANNELS)
         dispatcher.slack = SlackNotifier(webhook_url="https://hooks.slack.test/xxx")
 
         slack_response = MagicMock()
@@ -206,7 +233,7 @@ class TestPollToAlertToSlack:
     async def test_duplicate_alert_suppressed_within_window(self):
         """Second identical alert is deduped; Slack is only POSTed once."""
         cache = InMemoryCache()
-        dispatcher = NotificationDispatcher(cache=cache)
+        dispatcher = NotificationDispatcher(cache=cache, channels=_TEST_CHANNELS)
         dispatcher.slack = SlackNotifier(webhook_url="https://hooks.slack.test/xxx")
 
         alert = {
@@ -247,7 +274,7 @@ class TestPollToAlertToSlack:
         }
 
         cache = InMemoryCache()
-        dispatcher = NotificationDispatcher(cache=cache)
+        dispatcher = NotificationDispatcher(cache=cache, channels=_TEST_CHANNELS)
         dispatcher.slack = SlackNotifier(webhook_url="https://hooks.slack.test/xxx")
 
         slack_response = MagicMock()
@@ -264,7 +291,7 @@ class TestPollToAlertToSlack:
     async def test_slack_delivery_failure_does_not_dedup(self):
         """If Slack delivery fails, the alert is NOT suppressed for next time (F5)."""
         cache = InMemoryCache()
-        dispatcher = NotificationDispatcher(cache=cache)
+        dispatcher = NotificationDispatcher(cache=cache, channels=_TEST_CHANNELS)
         dispatcher.slack = SlackNotifier(webhook_url="https://hooks.slack.test/xxx")
 
         alert = {
@@ -316,7 +343,7 @@ class TestPollToAlertToSlack:
         slack_response.raise_for_status = MagicMock()
 
         def _dispatcher_factory():
-            d = NotificationDispatcher(cache=cache)
+            d = NotificationDispatcher(cache=cache, channels=_TEST_CHANNELS)
             d.slack = SlackNotifier(webhook_url="https://hooks.slack.test/xxx")
             return d
 
@@ -329,10 +356,9 @@ class TestPollToAlertToSlack:
             fetched = await polling.poll_integration_executions_async(integration)
 
         assert fetched == 1
-        alerts = [obj for obj in fake_factory.added if isinstance(obj, Alert)]
-        assert len(alerts) == 1
-        assert alerts[0].category == "unknown"
-        assert alerts[0].severity == "warning"
+        assert len(fake_factory.alerts) == 1
+        assert fake_factory.alerts[0]["category"] == "unknown"
+        assert fake_factory.alerts[0]["severity"] == "warning"
         mock_post.assert_awaited_once()
 
     @pytest.mark.asyncio
@@ -367,7 +393,7 @@ class TestPollToAlertToSlack:
 
         # Force the dispatcher to use our in-memory cache + a configured Slack.
         def _dispatcher_factory():
-            d = NotificationDispatcher(cache=cache)
+            d = NotificationDispatcher(cache=cache, channels=_TEST_CHANNELS)
             d.slack = SlackNotifier(webhook_url="https://hooks.slack.test/xxx")
             return d
 
@@ -381,11 +407,16 @@ class TestPollToAlertToSlack:
 
         # Ingestion happened.
         assert fetched == 1
-        # An Alert row was created by the real task (AUTH_001 -> critical).
-        alerts = [obj for obj in fake_factory.added if isinstance(obj, Alert)]
-        assert len(alerts) == 1
-        assert alerts[0].category == "auth"
-        assert alerts[0].severity == "critical"
+        # An Alert row was recorded by the real task (AUTH_001 -> critical).
+        assert len(fake_factory.alerts) == 1
+        recorded = fake_factory.alerts[0]
+        assert recorded["category"] == "auth"
+        assert recorded["severity"] == "critical"
+        # Incident identity must not include the platform run id, or the same
+        # recurring failure would never deduplicate against itself.
+        assert "exec_integ_1" not in recorded["dedup_key"]
+        assert recorded["dedup_key"].startswith("execution:")
+        assert recorded["dedup_key"].endswith(":auth:AUTH_001")
         # And Slack was actually delivered by the real dispatcher.
         mock_post.assert_awaited_once()
 
@@ -431,6 +462,6 @@ class TestPollToAlertToSlack:
             fetched = await polling.poll_integration_executions_async(integration)
 
         assert fetched == 1
-        assert [obj for obj in fake_factory.added if isinstance(obj, Alert)] == []
+        assert fake_factory.alerts == []
         mock_post.assert_not_awaited()
 

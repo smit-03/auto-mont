@@ -103,3 +103,33 @@ class RedisCache:
 async def get_cache() -> RedisCache:
     """Get a RedisCache instance."""
     return RedisCache()
+
+
+async def rate_limit(key: str, limit: int, window_s: int) -> tuple[bool, int]:
+    """
+    Fixed-window rate limit. Returns ``(allowed, retry_after_seconds)``.
+
+    Increments a counter under ``key`` and sets its expiry on first use, so the
+    window starts at the first request rather than at a wall-clock boundary.
+
+    **Fails open.** If Redis is unreachable the request is allowed. This endpoint
+    guards heartbeat pings: rejecting them during a Redis blip would mark live
+    workflows as missed and fire false critical alerts, which is a worse outcome
+    than briefly losing abuse protection on a single endpoint.
+    """
+    try:
+        client = await get_redis_client()
+        count = cast(int, await client.incr(key))
+        if count == 1:
+            await client.expire(key, window_s)
+        if count > limit:
+            ttl = cast(int, await client.ttl(key))
+            if ttl < 0:
+                # Key somehow has no expiry; re-arm it so it cannot wedge shut.
+                await client.expire(key, window_s)
+                ttl = window_s
+            return False, max(ttl, 1)
+        return True, 0
+    except Exception as e:
+        logger.error("ratelimit.unavailable", key=key, error=str(e))
+        return True, 0

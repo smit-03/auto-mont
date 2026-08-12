@@ -6,7 +6,7 @@ import uuid
 from datetime import datetime
 from typing import TYPE_CHECKING
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Index, String, Text, func
+from sqlalchemy import Boolean, DateTime, ForeignKey, Index, Integer, String, Text, func
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -71,6 +71,16 @@ class Alert(Base):
         server_default="false",
     )
     remediation_log: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    # Incident identity. One row per ongoing incident, not one per detection:
+    # a monitor that stays down is a single alert whose occurrence_count and
+    # last_seen_at advance, rather than a new row on every check.
+    dedup_key: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    occurrence_count: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=1, server_default="1"
+    )
+    last_seen_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
     acknowledged_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     acknowledged_by: Mapped[str | None] = mapped_column(String(255), nullable=True)
     resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
@@ -84,7 +94,7 @@ class Alert(Base):
     workspace: Mapped["Workspace"] = relationship(
         "Workspace",
         back_populates="alerts",
-        lazy="selectin",
+        lazy="raise",
     )
 
     # Indexes
@@ -96,6 +106,17 @@ class Alert(Base):
             "idx_alerts_unresolved",
             "workspace_id",
             "severity",
+            postgresql_where=resolved_at.is_(None),
+        ),
+        # At most one OPEN incident per (workspace, dedup_key). The predicate is
+        # what makes an incident re-openable: once resolved_at is set the row
+        # leaves the index, so a recurrence creates a genuinely new incident
+        # rather than resurrecting the closed one.
+        Index(
+            "uq_alerts_open_incident",
+            "workspace_id",
+            "dedup_key",
+            unique=True,
             postgresql_where=resolved_at.is_(None),
         ),
     )
