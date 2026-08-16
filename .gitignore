@@ -10,6 +10,8 @@ BLUEPRINT.md
 tsconfig.tsbuildinfo
 next-env.d.ts
 project_docs/
+# Session handoffs are working notes, not deliverables — they live in project_docs/
+session-handoff.md
 # Local env files — note: ".env" does NOT match ".env.local"
 .env.local
 .env.*.local

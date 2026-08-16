@@ -114,6 +114,13 @@ class Settings(BaseSettings):
     RESEND_API_KEY: str | None = Field(
         default=None, description="Resend API key for email delivery"
     )
+    # Resend's shared sender, usable without domain verification. It only
+    # delivers to the Resend account's own address, so it is a development
+    # sender: real customers need a verified domain here.
+    RESEND_FROM_EMAIL: str = Field(
+        default="WRP Alerts <onboarding@resend.dev>",
+        description="From address for alert emails",
+    )
     SLACK_WEBHOOK_URL: str | None = Field(default=None, description="Slack incoming webhook URL")
     SLACK_SIGNING_SECRET: str | None = Field(
         default=None, description="Slack signing secret for HITL callbacks"
@@ -166,14 +173,18 @@ class Settings(BaseSettings):
     def set_celery_broker(cls, v: str | None, info: ValidationInfo) -> str:
         if v:
             return cls._ensure_ssl_cert_reqs(v)
-        return cls._ensure_ssl_cert_reqs(str(info.data.get("REDIS_URL", "redis://localhost:6379/0")))
+        return cls._ensure_ssl_cert_reqs(
+            str(info.data.get("REDIS_URL", "redis://localhost:6379/0"))
+        )
 
     @field_validator("CELERY_RESULT_BACKEND", mode="before")
     @classmethod
     def set_celery_backend(cls, v: str | None, info: ValidationInfo) -> str:
         if v:
             return cls._ensure_ssl_cert_reqs(v)
-        return cls._ensure_ssl_cert_reqs(str(info.data.get("REDIS_URL", "redis://localhost:6379/0")))
+        return cls._ensure_ssl_cert_reqs(
+            str(info.data.get("REDIS_URL", "redis://localhost:6379/0"))
+        )
 
     @staticmethod
     def _ensure_ssl_cert_reqs(url: str) -> str:
@@ -206,7 +217,9 @@ def get_settings() -> Settings:
     """Get cached settings instance from the backend .env file."""
     env_values = {}
     if ENV_FILE.exists():
-        env_values = {key: value for key, value in dotenv_values(ENV_FILE).items() if value is not None}
+        env_values = {
+            key: value for key, value in dotenv_values(ENV_FILE).items() if value is not None
+        }
     return Settings(**env_values)
 
 

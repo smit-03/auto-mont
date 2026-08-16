@@ -26,13 +26,18 @@ from app.services.sentinel.n8n_adapter import N8NAdapter
 
 # Severity is not part of RuleMatch; the glue task derives it. Mirror that
 # mapping here so the alert handed to Slack is realistic.
-_CATEGORY_SEVERITY = {"auth": "critical", "api": "warning", "silent": "critical", "unknown": "warning"}
+_CATEGORY_SEVERITY = {
+    "auth": "critical",
+    "api": "warning",
+    "silent": "critical",
+    "unknown": "warning",
+}
 
 # Alerts now fan out to the alert's own workspace's channels rather than one
 # global webhook. Injecting the channel list keeps these tests DB-free while
 # still driving the real resolution -> delivery path.
 _TEST_WEBHOOK = "https://hooks.slack.test/xxx"
-_TEST_CHANNELS = [("test-channel", _TEST_WEBHOOK)]
+_TEST_CHANNELS = [("slack", "test-channel", _TEST_WEBHOOK)]
 
 
 class InMemoryCache:
@@ -62,7 +67,9 @@ def _n8n_payload(error_message: str) -> dict:
                 "workflowId": "wf_test",
                 "workflowName": "Test Workflow",
                 "status": "error",
-                "data": {"resultData": {"error": {"message": error_message, "name": "NodeApiError"}}},
+                "data": {
+                    "resultData": {"error": {"message": error_message, "name": "NodeApiError"}}
+                },
             }
         ]
     }
@@ -86,7 +93,9 @@ def _recent_n8n_payload(error_message: str) -> dict:
                 "workflowId": "wf_test",
                 "workflowName": "Test Workflow",
                 "status": "error",
-                "data": {"resultData": {"error": {"message": error_message, "name": "NodeApiError"}}},
+                "data": {
+                    "resultData": {"error": {"message": error_message, "name": "NodeApiError"}}
+                },
             }
         ]
     }
@@ -179,7 +188,8 @@ class TestPollToAlertToSlack:
 
         # 1. Poll: real adapter parsing of the mocked n8n response.
         normalized = [
-            e async for e in adapter.list_recent_executions(
+            e
+            async for e in adapter.list_recent_executions(
                 since=datetime(2026, 7, 18, tzinfo=UTC), limit=100
             )
         ]
@@ -214,7 +224,9 @@ class TestPollToAlertToSlack:
 
         slack_response = MagicMock()
         slack_response.raise_for_status = MagicMock()
-        with patch("httpx.AsyncClient.post", new=AsyncMock(return_value=slack_response)) as mock_post:
+        with patch(
+            "httpx.AsyncClient.post", new=AsyncMock(return_value=slack_response)
+        ) as mock_post:
             delivered = await dispatcher.send_alert(
                 alert=alert, dedup_key="integration:ws_integ:auth"
             )
@@ -225,9 +237,7 @@ class TestPollToAlertToSlack:
         _, kwargs = mock_post.call_args
         body = kwargs["json"]
         assert body["text"].startswith("[CRITICAL]")
-        assert any(
-            block.get("type") == "header" for block in body["blocks"]
-        )
+        assert any(block.get("type") == "header" for block in body["blocks"])
 
     @pytest.mark.asyncio
     async def test_duplicate_alert_suppressed_within_window(self):
@@ -247,7 +257,9 @@ class TestPollToAlertToSlack:
 
         slack_response = MagicMock()
         slack_response.raise_for_status = MagicMock()
-        with patch("httpx.AsyncClient.post", new=AsyncMock(return_value=slack_response)) as mock_post:
+        with patch(
+            "httpx.AsyncClient.post", new=AsyncMock(return_value=slack_response)
+        ) as mock_post:
             first = await dispatcher.send_alert(alert=alert, dedup_key="integration:ws_integ:auth")
             second = await dispatcher.send_alert(alert=alert, dedup_key="integration:ws_integ:auth")
 
@@ -279,7 +291,9 @@ class TestPollToAlertToSlack:
 
         slack_response = MagicMock()
         slack_response.raise_for_status = MagicMock()
-        with patch("httpx.AsyncClient.post", new=AsyncMock(return_value=slack_response)) as mock_post:
+        with patch(
+            "httpx.AsyncClient.post", new=AsyncMock(return_value=slack_response)
+        ) as mock_post:
             delivered = await dispatcher.send_alert(
                 alert=alert, dedup_key="integration:ws_integ:silent"
             )
@@ -304,9 +318,7 @@ class TestPollToAlertToSlack:
         }
 
         # First send: Slack raises -> not delivered, dedup key must NOT be set.
-        with patch(
-            "httpx.AsyncClient.post", new=AsyncMock(side_effect=RuntimeError("slack down"))
-        ):
+        with patch("httpx.AsyncClient.post", new=AsyncMock(side_effect=RuntimeError("slack down"))):
             first = await dispatcher.send_alert(alert=alert, dedup_key="integration:ws_integ:auth")
         assert first is False
         assert cache.store == {}  # F5: no dedup key set on failure
@@ -351,7 +363,9 @@ class TestPollToAlertToSlack:
             patch.object(polling, "get_session_factory", return_value=fake_factory),
             patch.object(polling, "_get_adapter", return_value=adapter),
             patch.object(polling, "NotificationDispatcher", _dispatcher_factory),
-            patch("httpx.AsyncClient.post", new=AsyncMock(return_value=slack_response)) as mock_post,
+            patch(
+                "httpx.AsyncClient.post", new=AsyncMock(return_value=slack_response)
+            ) as mock_post,
         ):
             fetched = await polling.poll_integration_executions_async(integration)
 
@@ -401,7 +415,9 @@ class TestPollToAlertToSlack:
             patch.object(polling, "get_session_factory", return_value=fake_factory),
             patch.object(polling, "_get_adapter", return_value=adapter),
             patch.object(polling, "NotificationDispatcher", _dispatcher_factory),
-            patch("httpx.AsyncClient.post", new=AsyncMock(return_value=slack_response)) as mock_post,
+            patch(
+                "httpx.AsyncClient.post", new=AsyncMock(return_value=slack_response)
+            ) as mock_post,
         ):
             fetched = await polling.poll_integration_executions_async(integration)
 
@@ -417,6 +433,15 @@ class TestPollToAlertToSlack:
         assert "exec_integ_1" not in recorded["dedup_key"]
         assert recorded["dedup_key"].startswith("execution:")
         assert recorded["dedup_key"].endswith(":auth:AUTH_001")
+
+        # The alert points at the execution row that caused it. Without this the
+        # column is NULL and an alert cannot be traced back to its run, which is
+        # exactly what made the dashboard's alert detail view useless.
+        ingested = [o for o in fake_factory.added if isinstance(o, polling.Execution)]
+        assert len(ingested) == 1
+        assert recorded["execution_id"] == ingested[0].id
+        assert recorded["execution_id"] is not None
+
         # And Slack was actually delivered by the real dispatcher.
         mock_post.assert_awaited_once()
 
@@ -464,4 +489,3 @@ class TestPollToAlertToSlack:
         assert fetched == 1
         assert fake_factory.alerts == []
         mock_post.assert_not_awaited()
-

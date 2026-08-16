@@ -274,9 +274,7 @@ def create_app() -> FastAPI:
             (f"ratelimit:ping:token:{ping_token}", settings.PING_RATE_LIMIT_PER_TOKEN),
             (f"ratelimit:ping:ip:{client_ip}", settings.PING_RATE_LIMIT_PER_IP),
         ):
-            allowed, retry_after = await rate_limit(
-                key, limit, settings.PING_RATE_LIMIT_WINDOW_S
-            )
+            allowed, retry_after = await rate_limit(key, limit, settings.PING_RATE_LIMIT_WINDOW_S)
             if not allowed:
                 return JSONResponse(
                     status_code=status.HTTP_429_TOO_MANY_REQUESTS,

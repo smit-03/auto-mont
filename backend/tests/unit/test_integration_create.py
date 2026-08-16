@@ -135,7 +135,9 @@ async def test_concurrent_create_race_second_request_gets_409():
     winner_session = FakeSession()
     loser_session = FakeSession(commit_raises=IntegrityError("duplicate key", None, None))
 
-    winner_result = await create_integration(_payload(), session=winner_session, workspace=workspace)
+    winner_result = await create_integration(
+        _payload(), session=winner_session, workspace=workspace
+    )
     assert winner_result.display_name == "Test Failing WF-1"
     assert winner_session.committed is True
 

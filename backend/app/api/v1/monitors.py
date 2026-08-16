@@ -70,6 +70,7 @@ async def create_monitor(
     monitor = Monitor(
         workspace_id=workspace.id,
         integration_id=payload.integration_id,
+        workflow_id=payload.workflow_id,
         name=payload.name,
         description=payload.description,
         monitor_type=payload.monitor_type,
@@ -111,6 +112,8 @@ async def update_monitor(
         monitor.name = payload.name
     if payload.description is not None:
         monitor.description = payload.description
+    if payload.workflow_id is not None:
+        monitor.workflow_id = payload.workflow_id
     if payload.grace_period_s is not None:
         monitor.grace_period_s = payload.grace_period_s
     if payload.expected_cron is not None:

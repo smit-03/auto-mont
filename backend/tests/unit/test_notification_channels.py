@@ -32,12 +32,12 @@ class InMemoryCache:
         return True
 
 
-def _channel(workspace_id, name, url, min_severity="warning"):
+def _channel(workspace_id, name, url, min_severity="warning", channel_type="slack"):
     """Build an unpersisted channel with a correctly encrypted destination."""
     return NotificationChannel(
         id=uuid.uuid4(),
         workspace_id=workspace_id,
-        channel_type="slack",
+        channel_type=channel_type,
         display_name=name,
         destination_enc=ENCRYPTION.encrypt(url, str(workspace_id)),
         destination_hint="••••test",
@@ -94,7 +94,7 @@ class TestChannelResolution:
         with p_fac, p_enc:
             resolved = await NotificationDispatcher()._resolve_channels(str(ws_a), "critical")
 
-        assert resolved == [("a", "https://a.test")]
+        assert resolved == [("slack", "a", "https://a.test")]
 
         # The isolation property: workspace_id is bound into the WHERE clause,
         # and it is the requesting workspace, not any other.
@@ -117,8 +117,8 @@ class TestChannelResolution:
             warning = await NotificationDispatcher()._resolve_channels(str(ws), "warning")
             critical = await NotificationDispatcher()._resolve_channels(str(ws), "critical")
 
-        assert [n for n, _ in warning] == ["all"]
-        assert [n for n, _ in critical] == ["all", "crit-only"]
+        assert [n for _, n, _ in warning] == ["all"]
+        assert [n for _, n, _ in critical] == ["all", "crit-only"]
 
     @pytest.mark.asyncio
     async def test_undecryptable_channel_is_skipped_not_fatal(self):
@@ -132,7 +132,7 @@ class TestChannelResolution:
         with p_fac, p_enc:
             resolved = await NotificationDispatcher()._resolve_channels(str(ws), "critical")
 
-        assert resolved == [("good", "https://good.test")]
+        assert resolved == [("slack", "good", "https://good.test")]
 
 
 class TestDelivery:
@@ -149,7 +149,10 @@ class TestDelivery:
     async def test_alert_fans_out_to_every_channel_of_its_workspace(self):
         dispatcher = NotificationDispatcher(
             cache=InMemoryCache(),
-            channels=[("ops", "https://ops.test"), ("oncall", "https://oncall.test")],
+            channels=[
+                ("slack", "ops", "https://ops.test"),
+                ("slack", "oncall", "https://oncall.test"),
+            ],
         )
         dispatcher.slack = SlackNotifier()
 
@@ -188,9 +191,7 @@ class TestDelivery:
         import app.services.notifications.dispatcher as disp
 
         monkeypatch.setattr(disp.settings, "ENVIRONMENT", "development", raising=False)
-        monkeypatch.setattr(
-            disp.settings, "SLACK_WEBHOOK_URL", "https://dev.test", raising=False
-        )
+        monkeypatch.setattr(disp.settings, "SLACK_WEBHOOK_URL", "https://dev.test", raising=False)
 
         dispatcher = NotificationDispatcher(cache=InMemoryCache(), channels=[])
         dispatcher.slack = SlackNotifier()
@@ -207,7 +208,7 @@ class TestDelivery:
     async def test_alert_without_workspace_is_not_delivered(self):
         """An alert with no tenant has no correct destination."""
         dispatcher = NotificationDispatcher(
-            cache=InMemoryCache(), channels=[("ops", "https://ops.test")]
+            cache=InMemoryCache(), channels=[("slack", "ops", "https://ops.test")]
         )
         dispatcher.slack = SlackNotifier()
 

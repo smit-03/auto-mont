@@ -8,7 +8,12 @@
 
 import { useCallback } from "react";
 import { useAuth } from "@clerk/nextjs";
-import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import {
+  useQuery,
+  useInfiniteQuery,
+  useMutation,
+  useQueryClient,
+} from "@tanstack/react-query";
 
 const API_BASE =
   process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000/api/v1";
@@ -105,6 +110,87 @@ export function useAlerts(filters?: { severity?: string; category?: string }) {
   return useQuery({
     queryKey: ["alerts", filters],
     queryFn: () => api<AlertRead[]>("/alerts" + (query ? `?${query}` : "")),
+  });
+}
+
+export function useAlert(id: string) {
+  const api = useAuthedFetcher();
+  return useQuery({
+    queryKey: ["alerts", id],
+    queryFn: () => api<AlertRead>(`/alerts/${id}`),
+    enabled: !!id,
+  });
+}
+
+// Execution hooks
+export function useExecutions(filters?: {
+  status?: string;
+  integration_id?: string;
+  workflow_id?: string;
+}) {
+  const api = useAuthedFetcher();
+
+  return useInfiniteQuery({
+    queryKey: ["executions", filters],
+    // The cursor is opaque: it comes from the previous page's next_cursor and
+    // is passed straight back. Never construct one here.
+    queryFn: ({ pageParam }: { pageParam: string | null }) => {
+      const params = new URLSearchParams();
+      if (filters?.status && filters.status !== "all") {
+        params.set("status", filters.status);
+      }
+      if (filters?.integration_id) {
+        params.set("integration_id", filters.integration_id);
+      }
+      if (filters?.workflow_id) params.set("workflow_id", filters.workflow_id);
+      if (pageParam) params.set("cursor", pageParam);
+      const query = params.toString();
+      return api<CursorPage<ExecutionRead>>(
+        "/executions" + (query ? `?${query}` : "")
+      );
+    },
+    initialPageParam: null as string | null,
+    // null next_cursor means the last page; returning undefined is how
+    // TanStack Query is told there is nothing more to fetch.
+    getNextPageParam: (lastPage) => lastPage.next_cursor ?? undefined,
+  });
+}
+
+export function useExecution(id: string) {
+  const api = useAuthedFetcher();
+  return useQuery({
+    queryKey: ["executions", id],
+    queryFn: () => api<ExecutionDetail>(`/executions/${id}`),
+    enabled: !!id,
+  });
+}
+
+export function useExecutionDiagnostic(id: string) {
+  const api = useAuthedFetcher();
+  return useQuery({
+    queryKey: ["executions", id, "diagnostic"],
+    queryFn: () => api<DiagnosticResult>(`/executions/${id}/diagnostic`),
+    enabled: !!id,
+    // A healthy run has no diagnosis and the endpoint answers 404. That is the
+    // expected outcome, not a transient failure, so do not retry it.
+    retry: false,
+  });
+}
+
+/**
+ * Workflows this integration has produced executions for.
+ *
+ * Backs the monitor form's workflow picker. Only workflows that have run at
+ * least once appear — a monitor on a workflow with no history has nothing to
+ * assert against yet.
+ */
+export function useIntegrationWorkflows(integrationId: string | undefined) {
+  const api = useAuthedFetcher();
+  return useQuery({
+    queryKey: ["integrations", integrationId, "workflows"],
+    queryFn: () =>
+      api<WorkflowSummary[]>(`/integrations/${integrationId}/workflows`),
+    enabled: !!integrationId,
   });
 }
 
@@ -210,31 +296,79 @@ export interface IntegrationCreate {
 
 export interface AlertRead {
   id: string;
+  workspace_id: string;
+  // Which record produced this alert. The backend has always returned these
+  // four; the interface omitted them, so the data arrived and was discarded —
+  // which is why an alert could not be traced to its cause in the UI.
+  integration_id?: string | null;
+  execution_id?: string | null;
+  monitor_id?: string | null;
+  credential_id?: string | null;
   severity: "info" | "warning" | "critical";
   category: string;
   title: string;
   description: string;
   root_cause?: string | null;
   suggested_fix?: string | null;
+  auto_remediated?: boolean;
   created_at: string;
   acknowledged_at?: string | null;
+  acknowledged_by?: string | null;
   resolved_at?: string | null;
+}
+
+/**
+ * The envelope used by cursor-paginated endpoints. The rest of the API returns
+ * bare arrays; pagination is the exception because a cursor is response-level
+ * metadata with nowhere to live inside an array. See DECISIONS.md.
+ */
+export interface CursorPage<T> {
+  items: T[];
+  next_cursor: string | null;
 }
 
 export interface ExecutionRead {
   id: string;
+  workspace_id: string;
+  integration_id: string;
   platform: string;
-  status: string;
-  workflow_name?: string;
-  items_processed?: number;
-  error_message?: string;
+  platform_run_id: string;
+  workflow_id: string;
+  workflow_name?: string | null;
+  status: "success" | "error" | "running" | "timeout" | "silent_fail";
+  started_at?: string | null;
+  finished_at?: string | null;
+  duration_ms?: number | null;
+  node_count?: number | null;
+  items_processed?: number | null;
+  error_message?: string | null;
+  error_node?: string | null;
+  outcome_valid?: boolean | null;
+  outcome_reason?: string | null;
   created_at: string;
+}
+
+// raw_payload is the platform's untouched response, so its shape is the
+// platform's business, not ours. The detail page reads known n8n paths
+// defensively rather than modelling it.
+export interface ExecutionDetail extends ExecutionRead {
+  raw_payload: Record<string, unknown>;
+}
+
+export interface DiagnosticResult {
+  root_cause: string;
+  category: string;
+  confidence: number;
+  suggested_fix: string;
+  requires_hitl: boolean;
 }
 
 export interface MonitorRead {
   id: string;
   name: string;
   monitor_type: string;
+  workflow_id?: string | null;
+  integration_id?: string | null;
   last_status: string;
   last_ping_at?: string | null;
   ping_url?: string | null;
@@ -242,11 +376,22 @@ export interface MonitorRead {
   alert_on_miss: boolean;
 }
 
+export interface WorkflowSummary {
+  workflow_id: string;
+  workflow_name?: string | null;
+  last_seen_at: string;
+}
+
 export interface MonitorCreate {
   name: string;
   monitor_type: string;
   integration_id?: string;
+  // Required by the backend when monitor_type is "outcome" — an outcome
+  // monitor with no workflow scope matches nothing.
+  workflow_id?: string;
+  description?: string;
   grace_period_s?: number;
+  expected_outcome?: Record<string, unknown> | null;
 }
 
 export interface MonitorUpdate {

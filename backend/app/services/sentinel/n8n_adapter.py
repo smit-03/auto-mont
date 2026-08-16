@@ -94,9 +94,7 @@ class N8NAdapter(BaseAdapter):
                 for exec_data in executions:
                     started_at_str = exec_data.get("startedAt")
                     if started_at_str:
-                        started_at = datetime.fromisoformat(
-                            started_at_str.replace("Z", "+00:00")
-                        )
+                        started_at = datetime.fromisoformat(started_at_str.replace("Z", "+00:00"))
                         if started_at < since:
                             continue
                         page_has_recent = True
@@ -210,7 +208,16 @@ class N8NAdapter(BaseAdapter):
                 error = result_data.get("error", {})
                 if isinstance(error, dict):
                     error_msg = error.get("message")
-                    error_node = error.get("name", "").replace("NodeApiError: ", "")
+                    # The failing node's name, not the exception class. This
+                    # read `error["name"]` — which is the class
+                    # (NodeOperationError) — so the UI attributed every failure
+                    # to an error type instead of a node. Falls back to the
+                    # class name so a payload without error.node still says
+                    # something rather than nothing.
+                    node = error.get("node")
+                    error_node = (isinstance(node, dict) and node.get("name")) or error.get(
+                        "name", ""
+                    ).replace("NodeApiError: ", "")
 
         # Parse timestamps
         started_at = None
@@ -245,10 +252,25 @@ class N8NAdapter(BaseAdapter):
         # Node count
         node_count = len(data.get("resultData", {}).get("runData", {})) if data else 0
 
+        # n8n does not return a top-level `workflowName` on executions — the name
+        # lives at `workflowData.name`, which the list endpoint includes because
+        # the poller requests includeData=true. Reading only the non-existent
+        # top-level key left every execution nameless, so alert titles fell back
+        # to the opaque workflow id ("Auth failure: k5nqWU1s8Xpjjwkw").
+        #
+        # The top-level key is still preferred if a future API version adds it;
+        # both are absent on payloads fetched without includeData, and None is a
+        # valid result the caller already handles.
+        workflow_name = exec_data.get("workflowName")
+        if not workflow_name:
+            workflow_data = exec_data.get("workflowData")
+            if isinstance(workflow_data, dict):
+                workflow_name = workflow_data.get("name")
+
         return NormalizedExecution(
             platform_run_id=exec_data.get("id", ""),
             workflow_id=exec_data.get("workflowId", ""),
-            workflow_name=exec_data.get("workflowName"),
+            workflow_name=workflow_name,
             status=status,
             started_at=started_at,
             finished_at=finished_at,

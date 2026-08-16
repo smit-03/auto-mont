@@ -32,14 +32,17 @@ class ExecutionRead(BaseModel):
     created_at: datetime
 
 
-class ExecutionListParams(BaseModel):
-    model_config = ConfigDict(strict=True)
+class ExecutionDetail(ExecutionRead):
+    """
+    A single execution including the platform's raw response.
 
-    status: Literal["success", "error", "running", "timeout", "silent_fail"] | None = None
-    integration_id: uuid.UUID | None = None
-    workflow_id: str | None = None
-    after: str | None = None  # Cursor for pagination
-    limit: int = Field(default=50, ge=1, le=100)
+    The list view deliberately omits raw_payload — it is unbounded (a large n8n
+    run carries every node's input and output) and would dominate a 50-row page.
+    The detail view is where node-level errors are inspected, so it pays that
+    cost once.
+    """
+
+    raw_payload: dict
 
 
 class ExecutionDiagnostic(BaseModel):

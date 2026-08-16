@@ -133,9 +133,7 @@ async def record_alert(
     return RecordedAlert(id=alert_id, occurrence_count=count, is_new=is_new)
 
 
-async def resolve_alerts_for_monitor(
-    session: AsyncSession, monitor_id: uuid.UUID
-) -> int:
+async def resolve_alerts_for_monitor(session: AsyncSession, monitor_id: uuid.UUID) -> int:
     """
     Close any open incident for a monitor. Returns the number resolved.
 

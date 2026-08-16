@@ -9,6 +9,7 @@ from app.models.execution import Execution
 from app.models.hitl import HITLRequest
 from app.models.integration import Integration
 from app.models.monitor import Monitor
+from app.models.workflow_schema import WorkflowSchema
 from app.models.workspace import Workspace
 
 __all__ = [
@@ -20,4 +21,5 @@ __all__ = [
     "Alert",
     "NotificationChannel",
     "HITLRequest",
+    "WorkflowSchema",
 ]

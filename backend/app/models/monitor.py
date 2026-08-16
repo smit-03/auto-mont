@@ -6,7 +6,7 @@ import uuid
 from datetime import datetime
 from typing import TYPE_CHECKING, Optional
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text, func
+from sqlalchemy import Boolean, DateTime, ForeignKey, Index, Integer, String, Text, func
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -39,6 +39,18 @@ class Monitor(Base):
         nullable=True,
         index=True,
     )
+    # Narrows an outcome/schema monitor to a single workflow within its
+    # integration. NULL means "not workflow-scoped", which is the only sensible
+    # value for heartbeat and cron monitors — those are triggered by an inbound
+    # ping, not by a workflow's output.
+    #
+    # A structural column rather than a key inside expected_outcome: JSONB has no
+    # schema validation, so a misspelled key would be accepted, stored, and then
+    # silently match nothing. A monitor that looks configured and quietly watches
+    # nothing is the exact failure class this product exists to catch.
+    # Not a foreign key — workflow_id is a platform-native string owned by n8n or
+    # Make, not a row in this database.
+    workflow_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
     monitor_type: Mapped[str] = mapped_column(
@@ -92,6 +104,17 @@ class Monitor(Base):
         "Integration",
         back_populates="monitors",
         lazy="raise",
+    )
+
+    # Declared here as well as in the migration: create_all() runs outside
+    # production, so a model-only omission gives dev and prod different schemas.
+    __table_args__ = (
+        Index(
+            "idx_monitors_workflow_scope",
+            "integration_id",
+            "workflow_id",
+            postgresql_where=workflow_id.is_not(None) & deleted_at.is_(None),
+        ),
     )
 
     def __repr__(self) -> str:

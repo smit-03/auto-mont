@@ -14,9 +14,15 @@ from app.core.logging import get_logger
 from app.core.redis import RedisCache, get_redis_client
 
 if TYPE_CHECKING:
+    from app.services.notifications.email import EmailNotifier
     from app.services.notifications.slack import SlackNotifier
 
 logger = get_logger(__name__)
+
+# Channel types this dispatcher knows how to deliver to. A row of any other
+# type is skipped rather than mis-delivered — `pagerduty` is a valid value in
+# the model but has no transport yet.
+DELIVERABLE_CHANNEL_TYPES = ("slack", "email")
 
 
 class NotificationDispatcher:
@@ -33,12 +39,13 @@ class NotificationDispatcher:
     def __init__(
         self,
         cache: RedisCache | None = None,
-        channels: list[tuple[str, str]] | None = None,
+        channels: list[tuple[str, str, str]] | None = None,
     ):
         self._cache: RedisCache | None = cache
         self.slack: SlackNotifier | None = None  # Lazy-loaded
-        # Explicit (display_name, destination_url) pairs, bypassing lookup.
-        # Test seam only — production always resolves per workspace.
+        self.email: EmailNotifier | None = None  # Lazy-loaded
+        # Explicit (channel_type, display_name, destination) triples, bypassing
+        # lookup. Test seam only — production always resolves per workspace.
         self._channels_override = channels
 
     async def _get_cache(self) -> RedisCache:
@@ -53,11 +60,18 @@ class NotificationDispatcher:
             self.slack = SlackNotifier()
         return self.slack
 
+    async def _get_email_notifier(self) -> EmailNotifier:
+        if self.email is None:
+            from app.services.notifications.email import EmailNotifier
+
+            self.email = EmailNotifier()
+        return self.email
+
     async def _resolve_channels(
         self, workspace_id: str, severity: str
-    ) -> list[tuple[str, str]]:
+    ) -> list[tuple[str, str, str]]:
         """
-        Return (display_name, destination_url) for this workspace's channels.
+        Return (channel_type, display_name, destination) for this workspace.
 
         Destinations are decrypted here and never cached — they are credentials.
         A channel whose destination fails to decrypt is skipped and logged
@@ -80,20 +94,18 @@ class NotificationDispatcher:
                     NotificationChannel.workspace_id == uuid.UUID(workspace_id),
                     NotificationChannel.deleted_at.is_(None),
                     NotificationChannel.enabled.is_(True),
-                    NotificationChannel.channel_type == "slack",
+                    NotificationChannel.channel_type.in_(DELIVERABLE_CHANNEL_TYPES),
                 )
             )
             rows = list(result.scalars().all())
 
         encryption = get_credential_encryption()
-        resolved: list[tuple[str, str]] = []
+        resolved: list[tuple[str, str, str]] = []
         for channel in rows:
             if SEVERITY_ORDER.get(channel.min_severity, 0) > threshold:
                 continue
             try:
-                destination = encryption.decrypt(
-                    channel.destination_enc, str(channel.workspace_id)
-                )
+                destination = encryption.decrypt(channel.destination_enc, str(channel.workspace_id))
             except Exception as e:
                 logger.error(
                     "notification.channel_decrypt_failed",
@@ -101,7 +113,7 @@ class NotificationDispatcher:
                     error=str(e),
                 )
                 continue
-            resolved.append((channel.display_name, destination))
+            resolved.append((channel.channel_type, channel.display_name, destination))
 
         return resolved
 
@@ -139,7 +151,7 @@ class NotificationDispatcher:
                     workspace_id=workspace_id,
                     detail="No channel configured; using SLACK_WEBHOOK_URL (non-production only)",
                 )
-                channels = [("dev-fallback", settings.SLACK_WEBHOOK_URL)]
+                channels = [("slack", "dev-fallback", settings.SLACK_WEBHOOK_URL)]
             else:
                 logger.error(
                     "notification.no_channels_configured",
@@ -150,29 +162,44 @@ class NotificationDispatcher:
                 return False
 
         success = False
-        slack_notifier = await self._get_slack_notifier()
 
-        for display_name, destination in channels:
+        # One failing channel must not stop the others: a workspace with Slack
+        # and email configured has asked for both, and a Slack outage is not a
+        # reason to withhold the email.
+        for channel_type, display_name, destination in channels:
             try:
-                delivered = await slack_notifier.send_alert(
-                    title=alert["title"],
-                    description=alert["description"],
-                    severity=alert["severity"],
-                    suggested_fix=alert.get("suggested_fix"),
-                    webhook_url=destination,
-                )
+                if channel_type == "email":
+                    notifier = await self._get_email_notifier()
+                    delivered = await notifier.send_alert(
+                        title=alert["title"],
+                        description=alert["description"],
+                        severity=alert["severity"],
+                        suggested_fix=alert.get("suggested_fix"),
+                        recipient=destination,
+                    )
+                else:
+                    slack_notifier = await self._get_slack_notifier()
+                    delivered = await slack_notifier.send_alert(
+                        title=alert["title"],
+                        description=alert["description"],
+                        severity=alert["severity"],
+                        suggested_fix=alert.get("suggested_fix"),
+                        webhook_url=destination,
+                    )
                 if delivered:
                     success = True
                     logger.info(
-                        "notification.slack_delivered",
+                        "notification.delivered",
                         alert_id=alert.get("id"),
                         channel=display_name,
+                        channel_type=channel_type,
                     )
             except Exception as e:
                 logger.error(
-                    "notification.slack_failed",
+                    "notification.delivery_failed",
                     alert_id=alert.get("id"),
                     channel=display_name,
+                    channel_type=channel_type,
                     error=str(e),
                 )
 

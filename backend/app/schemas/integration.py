@@ -54,6 +54,24 @@ class IntegrationRead(BaseModel):
     deleted_at: datetime | None = None
 
 
+class WorkflowSummary(BaseModel):
+    """
+    One workflow seen on an integration, derived from ingested executions.
+
+    Distinct workflow_ids from the executions table rather than a live call to
+    the platform's /workflows API: it needs no credentials, no network round
+    trip, and cannot fail while the platform is down. The tradeoff is that a
+    workflow which has never run does not appear — acceptable, because a monitor
+    on a workflow with no execution history has nothing to assert against yet.
+    """
+
+    model_config = ConfigDict(from_attributes=True)
+
+    workflow_id: str
+    workflow_name: str | None
+    last_seen_at: datetime
+
+
 class IntegrationTestResult(BaseModel):
     connected: bool
     error_message: str | None = None

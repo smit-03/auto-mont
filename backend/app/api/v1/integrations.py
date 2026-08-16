@@ -6,12 +6,13 @@ import uuid
 from datetime import UTC, datetime
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_workspace, get_db_session
 from app.core.security import get_credential_encryption
+from app.models.execution import Execution
 from app.models.integration import Integration
 from app.models.workspace import Workspace
 from app.schemas.integration import (
@@ -19,9 +20,44 @@ from app.schemas.integration import (
     IntegrationRead,
     IntegrationTestResult,
     IntegrationUpdate,
+    WorkflowSummary,
 )
 
 router = APIRouter()
+
+
+@router.get("/{integration_id}/workflows", response_model=list[WorkflowSummary])
+async def list_integration_workflows(
+    integration_id: uuid.UUID,
+    session: AsyncSession = Depends(get_db_session),
+    workspace: Workspace = Depends(get_current_workspace),
+) -> list[WorkflowSummary]:
+    """
+    List the workflows this integration has produced executions for.
+
+    Exists so a monitor's workflow can be picked from a list instead of typed.
+    A platform-native id like `k5nqWU1s8Xpjjwkw` transcribed by hand is exactly
+    the silent misconfiguration the workflow_id column was introduced to
+    prevent: a typo yields a monitor that matches nothing while looking
+    correctly configured.
+    """
+    result = await session.execute(
+        select(
+            Execution.workflow_id,
+            # Names can change; the most recent one is what the user recognises.
+            func.max(Execution.workflow_name).label("workflow_name"),
+            func.max(Execution.created_at).label("last_seen_at"),
+        )
+        .where(
+            Execution.workspace_id == workspace.id,
+            Execution.integration_id == integration_id,
+            Execution.deleted_at.is_(None),
+        )
+        .group_by(Execution.workflow_id)
+        .order_by(func.max(Execution.created_at).desc())
+    )
+
+    return [WorkflowSummary.model_validate(row) for row in result.all()]
 
 
 @router.get("", response_model=list[IntegrationRead])

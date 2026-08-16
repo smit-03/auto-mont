@@ -9,9 +9,64 @@ import {
   Trash2,
   XCircle,
 } from "lucide-react";
-import { useMonitors, useCreateMonitor, useDeleteMonitor, useUpdateMonitor } from "@/lib/api";
+import {
+  useMonitors,
+  useCreateMonitor,
+  useDeleteMonitor,
+  useUpdateMonitor,
+  useIntegrations,
+  useIntegrationWorkflows,
+} from "@/lib/api";
 
 const MONITOR_TYPES = ["heartbeat", "outcome", "cron", "schema"];
+
+// Monitor types that assert against a specific workflow's output rather than an
+// inbound ping. The backend requires workflow_id for "outcome" and rejects the
+// create without it.
+const WORKFLOW_SCOPED_TYPES = ["outcome", "schema"];
+
+const EMPTY_FORM = {
+  name: "",
+  monitor_type: "heartbeat",
+  grace_period_s: 300,
+  integration_id: "",
+  workflow_id: "",
+  min_records: "",
+  field_exists: "",
+  range_field: "",
+  range_min: "",
+  range_max: "",
+};
+
+/**
+ * Assemble expected_outcome from the filled-in assertion inputs.
+ *
+ * Only non-empty assertions are included. An assertion sent with an empty value
+ * would be evaluated as misconfigured by the backend and fire on every run.
+ */
+function buildExpectedOutcome(form: typeof EMPTY_FORM) {
+  const outcome: Record<string, unknown> = {};
+
+  if (form.min_records !== "") {
+    outcome.min_records = Number(form.min_records);
+  }
+  if (form.field_exists.trim() !== "") {
+    // Comma-separated input becomes the list form the backend accepts.
+    const fields = form.field_exists
+      .split(",")
+      .map((f) => f.trim())
+      .filter(Boolean);
+    outcome.field_exists = fields.length === 1 ? fields[0] : fields;
+  }
+  if (form.range_field.trim() !== "" && (form.range_min !== "" || form.range_max !== "")) {
+    const range: Record<string, unknown> = { field: form.range_field.trim() };
+    if (form.range_min !== "") range.min = Number(form.range_min);
+    if (form.range_max !== "") range.max = Number(form.range_max);
+    outcome.value_range = range;
+  }
+
+  return Object.keys(outcome).length > 0 ? outcome : null;
+}
 
 export default function MonitorsPage() {
   const { data: monitors = [], isLoading } = useMonitors();
@@ -23,11 +78,14 @@ export default function MonitorsPage() {
   const [selectedMonitorId, setSelectedMonitorId] = useState<string | null>(null);
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [form, setForm] = useState({
-    name: "",
-    monitor_type: "heartbeat",
-    grace_period_s: 300,
-  });
+  const [form, setForm] = useState(EMPTY_FORM);
+
+  const { data: integrations = [] } = useIntegrations();
+  const { data: workflows = [], isLoading: workflowsLoading } =
+    useIntegrationWorkflows(form.integration_id || undefined);
+
+  const isWorkflowScoped = WORKFLOW_SCOPED_TYPES.includes(form.monitor_type);
+  const isPingDriven = !isWorkflowScoped;
 
   const selectedMonitor = useMemo(
     () => monitors.find((monitor) => monitor.id === selectedMonitorId) ?? null,
@@ -37,9 +95,28 @@ export default function MonitorsPage() {
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError(null);
+
+    const expectedOutcome = buildExpectedOutcome(form);
+    if (form.monitor_type === "outcome" && !expectedOutcome) {
+      // Caught here rather than server-side: a monitor with no assertions can
+      // never fire, so it would sit in this list looking configured while
+      // watching nothing.
+      setError("An outcome monitor needs at least one assertion.");
+      return;
+    }
+
     try {
-      await createMonitor.mutateAsync(form);
-      setForm({ name: "", monitor_type: "heartbeat", grace_period_s: 300 });
+      await createMonitor.mutateAsync({
+        name: form.name,
+        monitor_type: form.monitor_type,
+        grace_period_s: form.grace_period_s,
+        ...(form.integration_id ? { integration_id: form.integration_id } : {}),
+        ...(isWorkflowScoped && form.workflow_id
+          ? { workflow_id: form.workflow_id }
+          : {}),
+        ...(expectedOutcome ? { expected_outcome: expectedOutcome } : {}),
+      });
+      setForm(EMPTY_FORM);
       setShowForm(false);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Unknown error");
@@ -120,21 +197,166 @@ export default function MonitorsPage() {
                 ))}
               </select>
             </div>
-            <div>
-              <label className="block text-sm font-medium">
-                Grace Period (seconds)
-              </label>
-              <input
-                type="number"
-                min="30"
-                max="3600"
-                value={form.grace_period_s}
-                onChange={(e) =>
-                  setForm({ ...form, grace_period_s: parseInt(e.target.value) })
-                }
-                className="mt-1 w-full rounded-md border p-2"
-              />
-            </div>
+            {isPingDriven && (
+              <div>
+                <label className="block text-sm font-medium">
+                  Grace Period (seconds)
+                </label>
+                <input
+                  type="number"
+                  min="30"
+                  max="3600"
+                  value={form.grace_period_s}
+                  onChange={(e) =>
+                    setForm({ ...form, grace_period_s: parseInt(e.target.value) })
+                  }
+                  className="mt-1 w-full rounded-md border p-2"
+                />
+              </div>
+            )}
+
+            {isWorkflowScoped && (
+              <>
+                <div>
+                  <label className="block text-sm font-medium">Integration</label>
+                  <select
+                    required
+                    value={form.integration_id}
+                    onChange={(e) =>
+                      // Workflows belong to an integration, so changing it
+                      // invalidates any workflow already picked.
+                      setForm({
+                        ...form,
+                        integration_id: e.target.value,
+                        workflow_id: "",
+                      })
+                    }
+                    className="mt-1 w-full rounded-md border p-2"
+                  >
+                    <option value="">Select an integration…</option>
+                    {integrations.map((i) => (
+                      <option key={i.id} value={i.id}>
+                        {i.display_name}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                <div>
+                  <label className="block text-sm font-medium">Workflow</label>
+                  <select
+                    required
+                    disabled={!form.integration_id || workflowsLoading}
+                    value={form.workflow_id}
+                    onChange={(e) =>
+                      setForm({ ...form, workflow_id: e.target.value })
+                    }
+                    className="mt-1 w-full rounded-md border p-2 disabled:bg-gray-50"
+                  >
+                    <option value="">
+                      {!form.integration_id
+                        ? "Select an integration first"
+                        : workflowsLoading
+                          ? "Loading workflows…"
+                          : "Select a workflow…"}
+                    </option>
+                    {workflows.map((w) => (
+                      <option key={w.workflow_id} value={w.workflow_id}>
+                        {w.workflow_name || w.workflow_id}
+                      </option>
+                    ))}
+                  </select>
+                  {form.integration_id &&
+                    !workflowsLoading &&
+                    workflows.length === 0 && (
+                      <p className="mt-1 text-xs text-gray-500">
+                        No workflows seen yet on this integration. A workflow
+                        appears here once it has run at least once.
+                      </p>
+                    )}
+                </div>
+              </>
+            )}
+
+            {form.monitor_type === "outcome" && (
+              <div className="space-y-3 rounded-md border border-dashed p-3">
+                <p className="text-xs uppercase tracking-wide text-gray-500">
+                  Assertions — all must pass
+                </p>
+
+                <div>
+                  <label className="block text-sm font-medium">
+                    Minimum records
+                  </label>
+                  <input
+                    type="number"
+                    min="0"
+                    value={form.min_records}
+                    onChange={(e) =>
+                      setForm({ ...form, min_records: e.target.value })
+                    }
+                    className="mt-1 w-full rounded-md border p-2"
+                    placeholder="e.g. 1 — alert if the run writes nothing"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-sm font-medium">
+                    Required fields
+                  </label>
+                  <input
+                    type="text"
+                    value={form.field_exists}
+                    onChange={(e) =>
+                      setForm({ ...form, field_exists: e.target.value })
+                    }
+                    className="mt-1 w-full rounded-md border p-2"
+                    placeholder="order_id, customer.email"
+                  />
+                  <p className="mt-1 text-xs text-gray-500">
+                    Comma-separated. Dotted paths reach nested fields.
+                  </p>
+                </div>
+
+                <div>
+                  <label className="block text-sm font-medium">
+                    Value range
+                  </label>
+                  <div className="mt-1 grid grid-cols-3 gap-2">
+                    <input
+                      type="text"
+                      value={form.range_field}
+                      onChange={(e) =>
+                        setForm({ ...form, range_field: e.target.value })
+                      }
+                      className="rounded-md border p-2"
+                      placeholder="field"
+                    />
+                    <input
+                      type="number"
+                      value={form.range_min}
+                      onChange={(e) =>
+                        setForm({ ...form, range_min: e.target.value })
+                      }
+                      className="rounded-md border p-2"
+                      placeholder="min"
+                    />
+                    <input
+                      type="number"
+                      value={form.range_max}
+                      onChange={(e) =>
+                        setForm({ ...form, range_max: e.target.value })
+                      }
+                      className="rounded-md border p-2"
+                      placeholder="max"
+                    />
+                  </div>
+                  <p className="mt-1 text-xs text-gray-500">
+                    Either bound may be left blank for a one-sided check.
+                  </p>
+                </div>
+              </div>
+            )}
             {error && <p className="text-sm text-red-600">{error}</p>}
             <button
               type="submit"
@@ -156,8 +378,9 @@ export default function MonitorsPage() {
       ) : monitors.length === 0 ? (
         <div className="rounded-lg bg-white p-6 shadow">
           <p className="text-gray-600">
-            No heartbeat monitors configured yet. Create one to catch silent
-            workflow failures.
+            No monitors configured yet. Create a heartbeat monitor to catch a
+            workflow that stops running, or an outcome monitor to catch one that
+            runs but produces the wrong output.
           </p>
         </div>
       ) : (
@@ -174,8 +397,14 @@ export default function MonitorsPage() {
                     <h3 className="font-semibold">{monitor.name}</h3>
                     <Eye className="h-4 w-4 text-gray-400" />
                   </div>
-                  <p className="text-sm text-gray-500 capitalize">
-                    {monitor.monitor_type}
+                  <p className="text-sm text-gray-500">
+                    <span className="capitalize">{monitor.monitor_type}</span>
+                    {monitor.workflow_id && (
+                      <span className="font-mono text-xs">
+                        {" · "}
+                        {monitor.workflow_id}
+                      </span>
+                    )}
                   </p>
                 </button>
                 <div className="flex items-center gap-2">

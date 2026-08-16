@@ -1,7 +1,8 @@
 "use client";
 
 import { useState } from "react";
-import { Filter } from "lucide-react";
+import { ChevronRight, Filter } from "lucide-react";
+import Link from "next/link";
 import { useAlerts } from "@/lib/api";
 
 export default function AlertsPage() {
@@ -50,23 +51,27 @@ export default function AlertsPage() {
       ) : (
         <div className="space-y-3">
           {filteredAlerts.map((alert) => (
-            <div
+            <Link
               key={alert.id}
-              className={`rounded-lg p-4 shadow ${getSeverityColor(alert.severity)}`}
+              href={`/alerts/${alert.id}`}
+              className={`block rounded-lg p-4 shadow transition hover:shadow-md focus:outline-none focus:ring-2 focus:ring-blue-500 ${getSeverityColor(alert.severity)}`}
             >
-              <div className="flex items-start justify-between">
-                <div>
+              <div className="flex items-start justify-between gap-4">
+                <div className="min-w-0">
                   <h3 className="font-semibold">{alert.title}</h3>
                   <p className="mt-1 text-sm">{alert.description}</p>
                   <p className="mt-2 text-xs text-gray-500">
                     {new Date(alert.created_at).toLocaleString()}
                   </p>
                 </div>
-                <span className="rounded-full px-2 py-1 text-xs font-medium capitalize">
-                  {alert.severity}
-                </span>
+                <div className="flex shrink-0 items-center gap-2">
+                  <span className="rounded-full px-2 py-1 text-xs font-medium capitalize">
+                    {alert.severity}
+                  </span>
+                  <ChevronRight className="h-4 w-4 opacity-60" />
+                </div>
               </div>
-            </div>
+            </Link>
           ))}
         </div>
       )}
