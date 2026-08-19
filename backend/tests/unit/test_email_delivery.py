@@ -228,3 +228,55 @@ class TestDispatcherRouting:
 
         assert delivered is True
         assert post.await_count == 1
+
+
+class TestSendTest:
+    """
+    send_test backs the /channels/{id}/test endpoint.
+
+    Its contract differs from send_alert in one way that matters: it must never
+    raise. SlackNotifier.send_test swallows everything, and the endpoint reports
+    a failed test as `delivered=False`, not as a 500.
+    """
+
+    @pytest.mark.asyncio
+    async def test_sends_to_the_given_recipient(self):
+        with patch("httpx.AsyncClient.post", new=AsyncMock(return_value=ok_response())) as post:
+            result = await notifier().send_test(recipient="ops@test.dev")
+
+        assert result is True
+        assert post.await_args.kwargs["json"]["to"] == ["ops@test.dev"]
+
+    @pytest.mark.asyncio
+    async def test_upstream_rejection_is_reported_not_raised(self):
+        """A 422 from Resend must surface as False, never as an exception."""
+        response = MagicMock()
+        response.status_code = 422
+        response.raise_for_status = MagicMock(
+            side_effect=httpx.HTTPStatusError("bad", request=MagicMock(), response=response)
+        )
+
+        with patch("httpx.AsyncClient.post", new=AsyncMock(return_value=response)):
+            result = await notifier().send_test(recipient="ops@test.dev")
+
+        assert result is False
+
+    @pytest.mark.asyncio
+    async def test_missing_recipient_fails_without_calling_out(self):
+        with patch("httpx.AsyncClient.post", new=AsyncMock()) as post:
+            result = await notifier().send_test(recipient=None)
+
+        assert result is False
+        assert post.await_count == 0
+
+    @pytest.mark.asyncio
+    async def test_missing_api_key_fails_without_calling_out(self):
+        """See TestFailureModes: api_key=None falls back to a populated .env."""
+        unconfigured = EmailNotifier(api_key="placeholder")
+        unconfigured.api_key = None
+
+        with patch("httpx.AsyncClient.post", new=AsyncMock()) as post:
+            result = await unconfigured.send_test(recipient="ops@test.dev")
+
+        assert result is False
+        assert post.await_count == 0

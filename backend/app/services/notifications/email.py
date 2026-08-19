@@ -122,3 +122,27 @@ class EmailNotifier:
         except Exception as e:
             logger.error("email.alert_error", error=str(e))
             return False
+
+    async def send_test(self, recipient: str | None = None) -> bool:
+        """
+        Send a test email to verify a channel is wired up.
+
+        Mirrors SlackNotifier.send_test, which never raises: the /test endpoint
+        reports a failed delivery as a result, not as a 500. send_alert raises
+        on an upstream rejection, so that is caught and folded into False here.
+        """
+        if not self.api_key or not recipient:
+            return False
+
+        try:
+            return await self.send_alert(
+                title="WRP email integration test",
+                description=(
+                    "This is a test message. Your email alert channel is "
+                    "configured correctly."
+                ),
+                severity="info",
+                recipient=recipient,
+            )
+        except ExternalServiceError:
+            return False

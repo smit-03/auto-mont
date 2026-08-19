@@ -11,9 +11,12 @@ import uuid
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from pydantic import ValidationError
 
+from app.api.v1.channels import _destination_hint
 from app.core.security import CredentialEncryption
 from app.models.channel import NotificationChannel
+from app.schemas.channel import ChannelCreate
 from app.services.notifications.dispatcher import NotificationDispatcher
 from app.services.notifications.slack import SlackNotifier
 
@@ -217,3 +220,138 @@ class TestDelivery:
 
         assert delivered is False
         post.assert_not_awaited()
+
+
+class TestChannelCreateValidation:
+    """
+    A destination that does not match its channel type is rejected at the door.
+
+    Nothing downstream re-checks it: the dispatcher posts a slack destination to
+    httpx and hands an email destination to Resend. A swapped pair therefore
+    surfaces as a silently undelivered alert, which is the one failure mode this
+    product cannot afford.
+    """
+
+    WEBHOOK = "https://hooks.slack.com/services/T000/B000/xxxxxxxx"
+
+    def test_accepts_a_slack_webhook(self):
+        channel = ChannelCreate(display_name="ops", destination=self.WEBHOOK)
+        assert channel.channel_type == "slack"
+
+    def test_accepts_an_email_address(self):
+        channel = ChannelCreate(
+            channel_type="email", display_name="oncall", destination="ops@example.com"
+        )
+        assert channel.destination == "ops@example.com"
+
+    def test_rejects_an_email_given_as_a_slack_destination(self):
+        with pytest.raises(ValidationError, match="https"):
+            ChannelCreate(display_name="ops", destination="ops@example.com")
+
+    def test_rejects_a_webhook_given_as_an_email_destination(self):
+        with pytest.raises(ValidationError, match="valid email"):
+            ChannelCreate(channel_type="email", display_name="ops", destination=self.WEBHOOK)
+
+    def test_rejects_a_plaintext_http_webhook(self):
+        """A webhook carries alert content; http would put it on the wire."""
+        with pytest.raises(ValidationError, match="https"):
+            ChannelCreate(
+                display_name="ops", destination="http://hooks.slack.com/services/T/B/x"
+            )
+
+    def test_rejects_a_webhook_on_an_unrelated_host(self):
+        with pytest.raises(ValidationError, match="slack.com"):
+            ChannelCreate(display_name="ops", destination="https://evil.test/services/T/B/x")
+
+    def test_accepts_an_enterprise_grid_subdomain(self):
+        channel = ChannelCreate(
+            display_name="ops", destination="https://acme.slack.com/services/T/B/xxxxxx"
+        )
+        assert channel.channel_type == "slack"
+
+    def test_rejects_a_host_merely_ending_in_the_brand(self):
+        """"notslack.com" must not pass as a slack.com subdomain."""
+        with pytest.raises(ValidationError, match="slack.com"):
+            ChannelCreate(display_name="ops", destination="https://notslack.com/services/T/B/x")
+
+
+class TestDestinationHint:
+    """The hint is shown in the UI, so it must identify without disclosing."""
+
+    def test_email_hint_keeps_the_domain_and_masks_the_local_part(self):
+        hint = _destination_hint("smitpativala03@gmail.com", "email")
+        assert hint == "sm••••@gmail.com"
+        assert "pativala03" not in hint
+
+    def test_webhook_hint_does_not_expose_the_secret_path(self):
+        secret = "xoxbSECRETTOKEN"
+        hint = _destination_hint(f"https://hooks.slack.com/services/T000/B000/{secret}", "slack")
+        assert secret not in hint
+
+
+class TestChannelTestEndpointRouting:
+    """
+    /channels/{id}/test must dispatch by channel type.
+
+    It previously read every destination as a Slack webhook, so testing an email
+    channel POSTed the subscriber's address at Slack and reported "Slack
+    rejected the test message" — a failure with no relationship to the truth.
+    """
+
+    class _Result:
+        def __init__(self, row):
+            self._row = row
+
+        def scalar_one_or_none(self):
+            return self._row
+
+    class _Session:
+        def __init__(self, row):
+            self._row = row
+
+        async def execute(self, *_a, **_kw):
+            return TestChannelTestEndpointRouting._Result(self._row)
+
+    async def _run(self, channel_type, destination):
+        from app.api.v1.channels import test_channel
+
+        ws = MagicMock()
+        ws.id = uuid.uuid4()
+        channel = _channel(ws.id, "ch", destination, channel_type=channel_type)
+
+        with (
+            # channels.py binds this name at import time, unlike the
+            # dispatcher, which imports it inside the call.
+            patch("app.api.v1.channels.get_credential_encryption", return_value=ENCRYPTION),
+            patch(
+                "app.services.notifications.email.EmailNotifier.send_test",
+                new=AsyncMock(return_value=True),
+            ) as email_test,
+            patch(
+                "app.services.notifications.slack.SlackNotifier.send_test",
+                new=AsyncMock(return_value=True),
+            ) as slack_test,
+        ):
+            result = await test_channel(
+                channel_id=channel.id, session=self._Session(channel), workspace=ws
+            )
+
+        return result, email_test, slack_test
+
+    @pytest.mark.asyncio
+    async def test_email_channel_uses_the_email_notifier(self):
+        result, email_test, slack_test = await self._run("email", "ops@example.com")
+
+        assert result.delivered is True
+        slack_test.assert_not_awaited()
+        assert email_test.await_args.kwargs["recipient"] == "ops@example.com"
+
+    @pytest.mark.asyncio
+    async def test_slack_channel_still_uses_the_slack_notifier(self):
+        result, email_test, slack_test = await self._run(
+            "slack", "https://hooks.slack.com/services/T/B/x"
+        )
+
+        assert result.delivered is True
+        email_test.assert_not_awaited()
+        slack_test.assert_awaited_once()

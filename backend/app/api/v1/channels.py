@@ -21,18 +21,25 @@ from app.schemas.channel import (
     ChannelTestResult,
     ChannelUpdate,
 )
+from app.services.notifications.email import EmailNotifier
 from app.services.notifications.slack import SlackNotifier
 
 router = APIRouter()
 
 
-def _destination_hint(destination: str) -> str:
+def _destination_hint(destination: str, channel_type: str) -> str:
     """
-    Build a safe display fragment for a webhook URL.
+    Build a safe display fragment for a destination.
 
-    Shows only the last path segment, truncated — enough for a user to tell two
-    channels apart, not enough to post to either.
+    Enough for a user to tell two channels apart, not enough to deliver to
+    either. Webhooks show only a truncated trailing path segment; emails keep
+    the domain and the first two characters of the local part, since a bare
+    tail ("••••il.com") tells a user nothing about which address it is.
     """
+    if channel_type == "email":
+        local, _, domain = destination.partition("@")
+        return f"{local[:2]}••••@{domain}"[:255] if domain else "••••"
+
     tail = destination.rstrip("/").rsplit("/", 1)[-1]
     return f"••••{tail[-6:]}" if len(tail) > 6 else "••••"
 
@@ -83,7 +90,7 @@ async def create_channel(
         channel_type=payload.channel_type,
         display_name=payload.display_name,
         destination_enc=encryption.encrypt(payload.destination, str(workspace.id)),
-        destination_hint=_destination_hint(payload.destination),
+        destination_hint=_destination_hint(payload.destination, payload.channel_type),
         min_severity=payload.min_severity,
     )
     session.add(channel)
@@ -146,8 +153,17 @@ async def test_channel(
             error_message="Stored destination could not be decrypted",
         )
 
-    delivered = await SlackNotifier(webhook_url=destination).send_test()
+    # Dispatch by type. This read the destination as a Slack webhook whatever
+    # the channel was, so testing an email channel posted the subscriber's
+    # address at Slack and reported a nonsense failure.
+    if channel.channel_type == "email":
+        delivered = await EmailNotifier().send_test(recipient=destination)
+        rejection = "Email provider rejected the test message"
+    else:
+        delivered = await SlackNotifier(webhook_url=destination).send_test()
+        rejection = "Slack rejected the test message"
+
     return ChannelTestResult(
         delivered=delivered,
-        error_message=None if delivered else "Slack rejected the test message",
+        error_message=None if delivered else rejection,
     )
