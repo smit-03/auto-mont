@@ -18,7 +18,14 @@ import {
   useIntegrationWorkflows,
 } from "@/lib/api";
 
-const MONITOR_TYPES = ["heartbeat", "outcome", "cron", "schema"];
+// Only the types the backend actually evaluates. "cron" and "schema" exist in
+// the model and API, but HeartbeatEngine._check_cron_schedule and
+// _check_schema_stability are still stubs returning None, so a monitor of
+// either type would sit in the list looking configured and never fire — the
+// exact silent failure this product exists to catch. Restore them here once
+// those checks are implemented. (Note: workflow-level schema *drift* detection
+// is unrelated and does work; it runs in the polling path.)
+const MONITOR_TYPES = ["heartbeat", "outcome"];
 
 // Monitor types that assert against a specific workflow's output rather than an
 // inbound ping. The backend requires workflow_id for "outcome" and rejects the
