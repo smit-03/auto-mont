@@ -56,7 +56,7 @@ class Monitor(Base):
     monitor_type: Mapped[str] = mapped_column(
         String(20),
         nullable=False,
-    )  # heartbeat | outcome | cron | schema
+    )  # heartbeat | outcome | cron
     # The token is its own indexed column, matched by equality. It used to be
     # extracted from ping_url with a LIKE '%token%' substring scan, which was
     # unindexed (a full table scan on every public request), could match the

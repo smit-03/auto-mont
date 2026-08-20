@@ -14,7 +14,7 @@ class MonitorBase(BaseModel):
 
     name: str = Field(..., min_length=1, max_length=255)
     description: str | None = Field(None, max_length=1000)
-    monitor_type: Literal["heartbeat", "outcome", "cron", "schema"]
+    monitor_type: Literal["heartbeat", "outcome", "cron"]
 
 
 class MonitorCreate(MonitorBase):
