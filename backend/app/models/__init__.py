@@ -6,6 +6,7 @@ from app.models.alert import Alert
 from app.models.channel import NotificationChannel
 from app.models.credential import Credential
 from app.models.execution import Execution
+from app.models.fkg import FKGEdge, FKGNode
 from app.models.hitl import HITLRequest
 from app.models.integration import Integration
 from app.models.monitor import Monitor
@@ -22,4 +23,6 @@ __all__ = [
     "NotificationChannel",
     "HITLRequest",
     "WorkflowSchema",
+    "FKGNode",
+    "FKGEdge",
 ]
