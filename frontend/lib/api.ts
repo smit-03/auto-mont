@@ -241,6 +241,68 @@ export function useUpdateMonitor() {
   });
 }
 
+// Notification channel hooks
+export function useChannels() {
+  const api = useAuthedFetcher();
+  return useQuery({
+    queryKey: ["channels"],
+    queryFn: () => api<ChannelRead[]>("/channels"),
+  });
+}
+
+export function useCreateChannel() {
+  const api = useAuthedFetcher();
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: (data: ChannelCreate) =>
+      api<ChannelRead>("/channels", {
+        method: "POST",
+        body: JSON.stringify(data),
+      }),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["channels"] }),
+  });
+}
+
+export function useUpdateChannel() {
+  const api = useAuthedFetcher();
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: ({ id, data }: { id: string; data: ChannelUpdate }) =>
+      api<ChannelRead>(`/channels/${id}`, {
+        method: "PATCH",
+        body: JSON.stringify(data),
+      }),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["channels"] }),
+  });
+}
+
+export function useDeleteChannel() {
+  const api = useAuthedFetcher();
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: (id: string) => api<void>(`/channels/${id}`, { method: "DELETE" }),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["channels"] }),
+  });
+}
+
+/**
+ * Send a test notification to one channel.
+ *
+ * Deliberately not invalidating the channel list: a test sends a message, it
+ * does not change the row. The result is transient UI state owned by the page.
+ */
+export function useTestChannel() {
+  const api = useAuthedFetcher();
+
+  return useMutation({
+    mutationFn: (id: string) =>
+      api<ChannelTestResult>(`/channels/${id}/test`, { method: "POST" }),
+  });
+}
+
 // Credential hooks
 export function useCredentials() {
   const api = useAuthedFetcher();
@@ -401,6 +463,38 @@ export interface MonitorUpdate {
   expected_cron?: string;
   expected_outcome?: Record<string, unknown> | null;
   alert_on_miss?: boolean;
+}
+
+export interface ChannelRead {
+  id: string;
+  workspace_id: string;
+  channel_type: string;
+  display_name: string;
+  // A masked fragment of the destination — enough to tell two channels apart,
+  // never enough to deliver to either. The real destination is encrypted at
+  // rest and is never returned by the API.
+  destination_hint?: string | null;
+  enabled: boolean;
+  min_severity: string;
+  created_at: string;
+}
+
+export interface ChannelCreate {
+  channel_type: string;
+  display_name: string;
+  destination: string;
+  min_severity?: string;
+}
+
+export interface ChannelUpdate {
+  display_name?: string;
+  enabled?: boolean;
+  min_severity?: string;
+}
+
+export interface ChannelTestResult {
+  delivered: boolean;
+  error_message?: string | null;
 }
 
 export interface CredentialRead {
