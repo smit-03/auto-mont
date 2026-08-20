@@ -18,24 +18,22 @@ import {
   useIntegrationWorkflows,
 } from "@/lib/api";
 
-// Only the types the backend actually evaluates. "cron" and "schema" exist in
-// the model and API, but HeartbeatEngine._check_cron_schedule and
-// _check_schema_stability are still stubs returning None, so a monitor of
-// either type would sit in the list looking configured and never fire — the
-// exact silent failure this product exists to catch. Restore them here once
-// those checks are implemented. (Note: workflow-level schema *drift* detection
-// is unrelated and does work; it runs in the polling path.)
-const MONITOR_TYPES = ["heartbeat", "outcome"];
+// Every type the backend actually evaluates. The "schema" type was removed
+// entirely: workflow-level schema *drift* detection already runs in the polling
+// path against a stored fingerprint, so a schema monitor duplicated a shipped
+// detector. Cron is evaluated by HeartbeatEngine._check_cron_schedule.
+const MONITOR_TYPES = ["heartbeat", "outcome", "cron"];
 
 // Monitor types that assert against a specific workflow's output rather than an
 // inbound ping. The backend requires workflow_id for "outcome" and rejects the
 // create without it.
-const WORKFLOW_SCOPED_TYPES = ["outcome", "schema"];
+const WORKFLOW_SCOPED_TYPES = ["outcome"];
 
 const EMPTY_FORM = {
   name: "",
   monitor_type: "heartbeat",
   grace_period_s: 300,
+  expected_cron: "",
   integration_id: "",
   workflow_id: "",
   min_records: "",
@@ -103,6 +101,13 @@ export default function MonitorsPage() {
     e.preventDefault();
     setError(null);
 
+    if (form.monitor_type === "cron" && !form.expected_cron.trim()) {
+      // Same reasoning as the outcome check below: _check_cron_schedule returns
+      // early without an expression, so the monitor would never fire.
+      setError("A cron monitor needs a schedule expression.");
+      return;
+    }
+
     const expectedOutcome = buildExpectedOutcome(form);
     if (form.monitor_type === "outcome" && !expectedOutcome) {
       // Caught here rather than server-side: a monitor with no assertions can
@@ -120,6 +125,9 @@ export default function MonitorsPage() {
         ...(form.integration_id ? { integration_id: form.integration_id } : {}),
         ...(isWorkflowScoped && form.workflow_id
           ? { workflow_id: form.workflow_id }
+          : {}),
+        ...(form.monitor_type === "cron" && form.expected_cron.trim()
+          ? { expected_cron: form.expected_cron.trim() }
           : {}),
         ...(expectedOutcome ? { expected_outcome: expectedOutcome } : {}),
       });
@@ -204,6 +212,26 @@ export default function MonitorsPage() {
                 ))}
               </select>
             </div>
+            {form.monitor_type === "cron" && (
+              <div>
+                <label className="block text-sm font-medium">
+                  Schedule (cron expression)
+                </label>
+                <input
+                  value={form.expected_cron}
+                  onChange={(e) =>
+                    setForm({ ...form, expected_cron: e.target.value })
+                  }
+                  className="mt-1 w-full rounded-md border p-2 font-mono"
+                  placeholder="0 9 * * *"
+                />
+                <p className="mt-1 text-xs text-gray-500">
+                  Standard 5-field cron, evaluated in UTC. The monitor alerts
+                  when a scheduled run&apos;s ping does not arrive within the
+                  grace period.
+                </p>
+              </div>
+            )}
             {isPingDriven && (
               <div>
                 <label className="block text-sm font-medium">

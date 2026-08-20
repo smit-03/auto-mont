@@ -59,6 +59,7 @@ dependencies = [
     # "opentelemetry-instrumentation-fastapi", "opentelemetry-exporter-otlp"
 
     # Utilities
+    "croniter==6.0.0",
     "python-dateutil==2.9.0.post0",
     "python-slugify==8.0.4",
     "tenacity==8.5.0",

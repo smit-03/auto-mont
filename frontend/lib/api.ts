@@ -453,6 +453,9 @@ export interface MonitorCreate {
   workflow_id?: string;
   description?: string;
   grace_period_s?: number;
+  // Required by the backend when monitor_type is "cron" — the schedule check
+  // returns early without one, so the monitor would never fire.
+  expected_cron?: string;
   expected_outcome?: Record<string, unknown> | null;
 }
 
