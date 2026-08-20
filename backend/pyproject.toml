@@ -165,8 +165,10 @@ disallow_incomplete_defs = false
 [[tool.mypy.overrides]]
 module = [
     "celery.*",
+    "croniter.*",
     "jose.*",
     "passlib.*",
+    "pgvector.*",
 ]
 ignore_missing_imports = true
 
