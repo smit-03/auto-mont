@@ -5,6 +5,10 @@ FastAPI backend with async SQLAlchemy, Celery workers, and n8n polling integrati
 ## Setup
 
 ```bash
+# Install torch CPU-only first — plain `pip install -e .` resolves torch's
+# default CUDA wheel, several GB larger than needed for local embeddings.
+pip install torch==2.13.0 --index-url https://download.pytorch.org/whl/cpu
+
 # Install dependencies
 pip install -e .
 

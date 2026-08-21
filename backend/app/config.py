@@ -100,13 +100,26 @@ class Settings(BaseSettings):
     # =========================================================================
     # AI / LLM Services
     # =========================================================================
+    # Unused while ANTHROPIC_API_KEY has no working key on this project. Left in
+    # place rather than removed: a real key would need no other code change.
     ANTHROPIC_API_KEY: str | None = Field(
         default=None, description="Anthropic API key for LLM Judge"
     )
+    # Unused: embeddings run locally (see DECISIONS.md, 2026-08-21) rather than
+    # through OpenAI, for the same no-key reason as ANTHROPIC_API_KEY above.
     OPENAI_API_KEY: str | None = Field(default=None, description="OpenAI API key for embeddings")
+    OPENROUTER_API_KEY: str | None = Field(
+        default=None, description="OpenRouter API key for LLM Judge (DECISIONS.md, 2026-08-21)"
+    )
     ENABLE_LLM_JUDGE: bool = Field(default=False, description="Enable LLM Judge diagnostic tier")
+    # USD budget stays for when a paid tier exists; on the current OpenRouter
+    # free tier every request costs $0, so REQUEST_LIMIT below is the gate that
+    # actually binds. See DECISIONS.md, 2026-08-21.
     LLM_JUDGE_DAILY_BUDGET_USD: float = Field(default=10.0, ge=0.0, le=1000.0)
-    LLM_JUDGE_MODEL: str = Field(default="claude-sonnet-4-6")
+    LLM_JUDGE_DAILY_REQUEST_LIMIT: int = Field(
+        default=45, ge=0, description="OpenRouter free tier is ~50 req/day/key; stay under it"
+    )
+    LLM_JUDGE_MODEL: str = Field(default="z-ai/glm-5.2:free")
 
     # =========================================================================
     # Notifications

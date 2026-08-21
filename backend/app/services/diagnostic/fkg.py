@@ -32,6 +32,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.logging import get_logger
 from app.models.fkg import FKGEdge, FKGNode
+from app.services.diagnostic.embeddings import EMBEDDING_MODEL_NAME, embed_passage
 
 logger = get_logger(__name__)
 
@@ -241,6 +242,21 @@ async def ingest_failure(
         },
         confidence=confidence,
     )
+
+    if is_new:
+        # Only new signatures are embedded. `label` is the normalized text and
+        # is identical for every recurrence of the same signature, so
+        # re-embedding a recurrence would spend a CPU encode to produce the
+        # vector already stored under this node. Not "only sometimes embed" —
+        # every signature gets one, exactly once, on the ingestion that first
+        # creates it.
+        embedding = await embed_passage(normalized)
+        await set_node_embedding(
+            session,
+            node_id=signature_node_id,
+            embedding=embedding,
+            model=EMBEDDING_MODEL_NAME,
+        )
 
     # FailureInstance is deliberately not deduplicated: one row per occurrence.
     # This is the table Phase 3's "50+ diagnosed failures" criterion counts.

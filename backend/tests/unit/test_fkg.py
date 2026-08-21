@@ -3,14 +3,20 @@ Unit tests for Failure Knowledge Graph ingestion.
 
 The database is faked at the session boundary, same convention as
 test_baseline.py and test_fkg_traversal.py, but ingestion writes rather than
-reads, so the fake here is a recorder: it compiles each pg_insert statement to
-its bound parameters (SQLAlchemy Insert.compile().params works without a live
-connection — it does not require executing anything), applies the same
-dedup-key upsert semantics Postgres would via its ON CONFLICT clause, and
-records what would have landed in fkg_nodes and fkg_edges. That is the
-question these tests answer: for a given diagnosis, which nodes and edges does
-ingest_failure actually write, and does re-ingesting a recurrence increment
-rather than duplicate.
+reads, so the fake here is a recorder: it compiles each pg_insert/update
+statement to its bound parameters (SQLAlchemy's Insert/Update.compile().params
+works without a live connection — it does not require executing anything),
+applies the same dedup-key upsert semantics Postgres would via its ON CONFLICT
+clause, and records what would have landed in fkg_nodes and fkg_edges. That is
+the question these tests answer: for a given diagnosis, which nodes and edges
+does ingest_failure actually write, and does re-ingesting a recurrence
+increment rather than duplicate.
+
+embed_passage is monkeypatched to a fixed vector for every test in this file —
+these tests are about ingestion's node/edge decisions, not about the real
+sentence-transformers model, which is exercised once, live, in a manual smoke
+test rather than in the suite (loading ~1.3GB of weights on every test run
+would be a cost only the embedding path itself should pay).
 """
 
 import uuid
@@ -18,6 +24,7 @@ import uuid
 import pytest
 from sqlalchemy.dialects import postgresql
 
+from app.services.diagnostic import fkg as fkg_module
 from app.services.diagnostic.fkg import (
     ingest_failure,
     normalize_error_message,
@@ -25,6 +32,19 @@ from app.services.diagnostic.fkg import (
 )
 
 WORKSPACE_ID = uuid.uuid4()
+_FAKE_EMBEDDING = [0.1, 0.2, 0.3]
+
+
+@pytest.fixture(autouse=True)
+def fake_embed_passage(monkeypatch):
+    calls = []
+
+    async def fake(text):
+        calls.append(text)
+        return _FAKE_EMBEDDING
+
+    monkeypatch.setattr(fkg_module, "embed_passage", fake)
+    return calls
 
 
 class _Row:
@@ -63,6 +83,20 @@ class FakeGraphSession:
         compiled = stmt.compile(dialect=postgresql.dialect())
         params = dict(compiled.params)
         table = stmt.table.name
+
+        if getattr(stmt, "is_update", False) and table == "fkg_nodes":
+            # set_node_embedding: UPDATE fkg_nodes SET embedding=..., embedding_model=...
+            # WHERE id = :id_1. The WHERE-bound id is the only way to know which
+            # node this call updates — there is no RETURNING to read it back from.
+            node_id = params["id_1"]
+            for node in self.nodes.values():
+                if node["id"] == node_id:
+                    node["embedding"] = params["embedding"]
+                    node["embedding_model"] = params["embedding_model"]
+                    break
+            else:
+                raise AssertionError(f"embedding set on unknown node id {node_id}")
+            return _ExecResult(_Row([None]))
 
         if table == "fkg_nodes":
             key = (params.get("workspace_id"), params["node_type"], params.get("dedup_key"))
@@ -339,3 +373,55 @@ class TestSignatureNormalization:
         assert sig_node["values"]["label"] == normalize_error_message(
             "Request to https://api.example.com/x timed out after 30012ms"
         )
+
+
+class TestEmbeddingWiring:
+    """Only a new ErrorSignature gets embedded; a recurrence does not re-embed."""
+
+    @pytest.mark.asyncio
+    async def test_new_signature_is_embedded(self, fake_embed_passage):
+        session = FakeGraphSession()
+
+        result = await ingest(session)
+
+        assert len(fake_embed_passage) == 1
+        sig_node = session.nodes[
+            next(k for k in session.nodes if k[1] == "ErrorSignature")
+        ]
+        assert sig_node["embedding"] == _FAKE_EMBEDDING
+        assert sig_node["embedding_model"] is not None
+        assert result.signature_node_id == sig_node["id"]
+
+    @pytest.mark.asyncio
+    async def test_embed_passage_receives_the_normalized_text_not_the_raw_message(
+        self, fake_embed_passage
+    ):
+        raw = "Request to https://api.example.com/x timed out after 30012ms"
+        session = FakeGraphSession()
+
+        await ingest(session, error_message=raw)
+
+        assert fake_embed_passage == [normalize_error_message(raw)]
+        assert fake_embed_passage[0] != raw
+
+    @pytest.mark.asyncio
+    async def test_recurrence_does_not_re_embed(self, fake_embed_passage):
+        """
+        Mutation guard on `if is_new:` — dropping it would call embed_passage
+        on every ingestion of a recurring failure, spending a CPU encode to
+        reproduce a vector already stored under the node.
+        """
+        session = FakeGraphSession()
+
+        await ingest(session)
+        await ingest(session)
+
+        assert len(fake_embed_passage) == 1
+
+    @pytest.mark.asyncio
+    async def test_no_signature_no_embedding_call(self, fake_embed_passage):
+        session = FakeGraphSession()
+
+        await ingest(session, error_message="")
+
+        assert fake_embed_passage == []

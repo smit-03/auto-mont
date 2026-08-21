@@ -14,9 +14,11 @@ import pytest
 
 from app.services.diagnostic.fkg_traversal import (
     _DEPTH_DECAY,
+    _MIN_SIMILARITY,
     best_remediation,
     best_root_cause,
     find_root_causes,
+    find_similar_signature,
 )
 
 
@@ -41,6 +43,9 @@ class FakeMappingsResult:
 
     def all(self):
         return self._rows
+
+    def first(self):
+        return self._rows[0] if self._rows else None
 
 
 class FakeSession:
@@ -200,3 +205,78 @@ class TestBestPicking:
         remediation = self.match("RemediationWorkflow", depth=2, confidence=0.5)
 
         assert best_remediation([cause, remediation]) is remediation
+
+
+class TestFindSimilarSignature:
+    """
+    find_similar_signature is a single-row nearest-neighbour lookup, not the
+    recursive CTE — its own FakeSession stands in the same way, returning a
+    canned `(dedup_key, similarity)` row instead of a path.
+    """
+
+    async def similar(self, session):
+        return await find_similar_signature(
+            session, workspace_id=uuid.uuid4(), embedding=[0.1, 0.2, 0.3]
+        )
+
+    @pytest.mark.asyncio
+    async def test_no_rows_returns_none(self):
+        session = FakeSession([])
+
+        result = await self.similar(session)
+
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_strong_match_is_returned(self):
+        session = FakeSession([{"dedup_key": "sig-abc", "similarity": 0.95}])
+
+        result = await self.similar(session)
+
+        assert result is not None
+        assert result.dedup_key == "sig-abc"
+        assert result.similarity == 0.95
+
+    @pytest.mark.asyncio
+    async def test_similarity_exactly_at_the_floor_is_accepted(self):
+        session = FakeSession([{"dedup_key": "sig-abc", "similarity": _MIN_SIMILARITY}])
+
+        result = await self.similar(session)
+
+        assert result is not None
+
+    @pytest.mark.asyncio
+    async def test_similarity_a_hair_below_the_floor_is_rejected(self):
+        """
+        Mutation guard on `similarity < _MIN_SIMILARITY`: the nearest neighbour
+        the query found is not close enough to trust as the same failure.
+        """
+        session = FakeSession([{"dedup_key": "sig-abc", "similarity": _MIN_SIMILARITY - 0.01}])
+
+        result = await self.similar(session)
+
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_embedding_is_passed_as_a_pgvector_literal(self):
+        """
+        Guards the `_vector_literal` formatting: a raw Python list handed to
+        asyncpg for a `::vector`-cast text parameter would fail to bind, not
+        silently misbehave — but a malformed literal (wrong brackets, stray
+        Python repr artifacts) would only be caught by a live database.
+        """
+        session = FakeSession([])
+
+        await find_similar_signature(session, workspace_id=uuid.uuid4(), embedding=[1.0, -0.5, 0.0])
+
+        literal = session.last_params["query_embedding"]
+        assert literal == "[1.0,-0.5,0.0]"
+
+    @pytest.mark.asyncio
+    async def test_workspace_id_is_scoped_in_the_query_params(self):
+        session = FakeSession([])
+        workspace_id = uuid.uuid4()
+
+        await find_similar_signature(session, workspace_id=workspace_id, embedding=[0.1])
+
+        assert session.last_params["workspace_id"] == str(workspace_id)

@@ -26,12 +26,14 @@ from types import SimpleNamespace
 import pytest
 
 from app.services.diagnostic import engine as engine_module
+from app.services.diagnostic.baseline import BaselineAnomaly
 from app.services.diagnostic.engine import (
     TIER_THRESHOLDS,
     DiagnosticEngine,
     DiagnosticTier,
 )
-from app.services.diagnostic.fkg_traversal import FKGMatch
+from app.services.diagnostic.fkg_traversal import FKGMatch, SimilarSignature
+from app.services.diagnostic.llm_judge import JudgeVerdict
 from app.services.diagnostic.rule_engine import RuleMatch
 from app.services.diagnostic.schema_checker import SchemaDrift
 from app.services.sentinel.base_adapter import NormalizedExecution
@@ -42,19 +44,61 @@ INTEGRATION_ID = uuid.uuid4()
 
 @pytest.fixture(autouse=True)
 def fkg(monkeypatch):
-    """Stand in for the graph: an empty read and a recorded, no-op write."""
-    state = SimpleNamespace(matches=[], find_calls=0, ingest_calls=[])
+    """
+    Stand in for the graph: an empty exact-hash read, no similar signature, and
+    a recorded, no-op write. Tests that care about tier 3 set `fkg.matches` for
+    an exact match or `fkg.similar` for a similarity-fallback match.
+    """
+    state = SimpleNamespace(
+        matches=[],
+        # Returned only for the second traversal — the one anchored on
+        # find_similar_signature's match, not the initial exact-hash query.
+        # Keeping these separate matters: the exact-hash call always runs
+        # first, and if it returned similarity-anchored data too, a test could
+        # pass while exercising the wrong path entirely.
+        similarity_matches=[],
+        find_calls=0,
+        ingest_calls=[],
+        similar=None,
+        similarity_calls=0,
+        embed_query_calls=0,
+    )
 
     async def fake_find_root_causes(session, **kwargs):
         state.find_calls += 1
+        if state.similar is not None and kwargs.get("signature_hash") == state.similar.dedup_key:
+            return state.similarity_matches
         return state.matches
 
     async def fake_ingest_failure(session, **kwargs):
         state.ingest_calls.append(kwargs)
         return None
 
+    async def fake_embed_query(text):
+        state.embed_query_calls += 1
+        return [0.0, 0.0, 0.0, 0.0]
+
+    async def fake_find_similar_signature(session, **kwargs):
+        state.similarity_calls += 1
+        return state.similar
+
     monkeypatch.setattr(engine_module, "find_root_causes", fake_find_root_causes)
     monkeypatch.setattr(engine_module, "ingest_failure", fake_ingest_failure)
+    monkeypatch.setattr(engine_module, "embed_query", fake_embed_query)
+    monkeypatch.setattr(engine_module, "find_similar_signature", fake_find_similar_signature)
+    return state
+
+
+@pytest.fixture(autouse=True)
+def baseline_tier(monkeypatch):
+    """Stand in for tier 4: no anomalies by default."""
+    state = SimpleNamespace(anomalies=[], calls=0)
+
+    async def fake_check_baseline_anomalies(session, **kwargs):
+        state.calls += 1
+        return state.anomalies
+
+    monkeypatch.setattr(engine_module, "check_baseline_anomalies", fake_check_baseline_anomalies)
     return state
 
 
@@ -300,11 +344,12 @@ class TestDriftConfidenceSplit:
 
 class TestExhaustedCascade:
     @pytest.mark.asyncio
-    async def test_no_tier_answers_returns_none(self, monkeypatch, fkg):
+    async def test_no_tier_answers_returns_none(self, monkeypatch, fkg, baseline_tier):
         """
         None means "nothing attached explains this", not "healthy". Tier 5 is
-        what will eventually escalate this case. fkg.matches defaults to [],
-        so tier 3 runs and also finds nothing.
+        what will eventually escalate this case. Every fake defaults to "found
+        nothing", so tiers 3's both paths and tier 4 all run and all find
+        nothing.
         """
         drift_state = patch_drift(monkeypatch, None)
         engine = DiagnosticEngine(rule_engine=FakeRuleEngine(None))
@@ -313,11 +358,15 @@ class TestExhaustedCascade:
 
         assert result is None
         assert drift_state["calls"] == 1, "cascade stopped before exhausting its tiers"
-        assert fkg.find_calls == 1, "tier 3 never got a turn"
+        assert fkg.find_calls == 1, "tier 3's exact-hash lookup never got a turn"
+        assert fkg.similarity_calls == 1, "tier 3's similarity fallback never got a turn"
+        assert baseline_tier.calls == 1, "tier 4 never got a turn"
         assert fkg.ingest_calls == [], "nothing was diagnosed; nothing should be written"
 
     @pytest.mark.asyncio
-    async def test_every_attached_tier_is_reached_when_none_answer(self, monkeypatch, fkg):
+    async def test_every_attached_tier_is_reached_when_none_answer(
+        self, monkeypatch, fkg, baseline_tier
+    ):
         """Guards against a tier being dropped from _TIERS by accident."""
         rule = FakeRuleEngine(None)
         drift_state = patch_drift(monkeypatch, None)
@@ -327,7 +376,8 @@ class TestExhaustedCascade:
         assert rule.calls == 1
         assert drift_state["calls"] == 1
         assert fkg.find_calls == 1
-        assert len(engine_module._TIERS) == 3
+        assert baseline_tier.calls == 1
+        assert len(engine_module._TIERS) == 5
 
 
 class TestFkgTraversalTier:
@@ -353,16 +403,22 @@ class TestFkgTraversalTier:
 
         assert result is None
         assert fkg.find_calls == 0
+        assert fkg.similarity_calls == 0
 
     @pytest.mark.asyncio
     async def test_empty_graph_returns_none(self, monkeypatch, fkg):
-        """fkg.matches defaults to [] — the literal empty-graph case."""
+        """
+        fkg.matches and fkg.similar both default empty — the literal
+        empty-graph case. An exact-hash miss should still try similarity
+        before tier 3 gives up.
+        """
         patch_drift(monkeypatch, None)
         engine = DiagnosticEngine(rule_engine=FakeRuleEngine(None))
 
         result = await run(engine)
 
         assert fkg.find_calls == 1
+        assert fkg.similarity_calls == 1
         assert result is None
 
     @pytest.mark.asyncio
@@ -386,6 +442,7 @@ class TestFkgTraversalTier:
         assert result.suggested_fix == "Reconnect the account"
         assert result.confidence == 0.9
         assert result.remediation_playbook is None
+        assert fkg.similarity_calls == 0, "exact match found; the fallback should not have run"
 
     @pytest.mark.asyncio
     async def test_remediation_match_is_wired_into_the_playbook(self, monkeypatch, fkg):
@@ -532,3 +589,284 @@ class TestIngestionWriteSide:
         )
 
         assert fkg.ingest_calls[0]["execution_id"] == exec_id
+
+
+class TestFkgSimilarityFallback:
+    """
+    Tier 3's second path: an exact-hash miss falls back to embedding
+    similarity. fkg.similar controls what the fallback finds; fkg.matches
+    (still []) controls what find_root_causes returns once anchored there.
+    """
+
+    @pytest.mark.asyncio
+    async def test_no_similar_signature_leaves_tier_3_empty(self, monkeypatch, fkg):
+        patch_drift(monkeypatch, None)
+        engine = DiagnosticEngine(rule_engine=FakeRuleEngine(None))
+
+        result = await run(engine)
+
+        assert fkg.similarity_calls == 1
+        assert fkg.find_calls == 1, "only the exact-hash attempt; no anchor to traverse from"
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_similar_signature_with_no_root_cause_answers_nothing(self, monkeypatch, fkg):
+        """A similar signature exists but has never been linked to a root cause."""
+        patch_drift(monkeypatch, None)
+        fkg.similar = SimilarSignature(dedup_key="sig-abc", similarity=0.95)
+        engine = DiagnosticEngine(rule_engine=FakeRuleEngine(None))
+
+        result = await run(engine)
+
+        assert fkg.find_calls == 2, "exact attempt, then a second traversal anchored on the match"
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_similar_signature_confidence_is_discounted_by_similarity(
+        self, monkeypatch, fkg
+    ):
+        patch_drift(monkeypatch, None)
+        fkg.similar = SimilarSignature(dedup_key="sig-abc", similarity=0.9)
+        fkg.similarity_matches = [fkg_match(confidence=0.9, properties={"category": "auth"})]
+        engine = DiagnosticEngine(rule_engine=FakeRuleEngine(None))
+
+        result = await run(engine)
+
+        assert result is not None
+        assert result.tier_used is DiagnosticTier.FKG_TRAVERSAL
+        assert result.confidence == round(0.9 * 0.9, 4)
+
+    @pytest.mark.asyncio
+    async def test_borderline_similarity_can_fall_below_the_tier_floor(self, monkeypatch, fkg):
+        """
+        A merely-similar match to a confident root cause should not clear tier
+        3 on the root cause's confidence alone — the similarity itself has to
+        be strong too. 0.9 confidence * 0.85 similarity = 0.765, below the 0.80
+        floor: the cascade should exhaust rather than answer here.
+        """
+        patch_drift(monkeypatch, None)
+        fkg.similar = SimilarSignature(dedup_key="sig-abc", similarity=0.85)
+        fkg.similarity_matches = [fkg_match(confidence=0.9, properties={"category": "auth"})]
+        engine = DiagnosticEngine(rule_engine=FakeRuleEngine(None))
+
+        result = await run(engine)
+
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_similarity_match_is_ingested_like_any_other_tier_3_answer(
+        self, monkeypatch, fkg
+    ):
+        patch_drift(monkeypatch, None)
+        fkg.similar = SimilarSignature(dedup_key="sig-abc", similarity=0.95)
+        fkg.similarity_matches = [fkg_match(confidence=0.95, properties={"category": "auth"})]
+        engine = DiagnosticEngine(rule_engine=FakeRuleEngine(None))
+
+        await run(engine)
+
+        assert len(fkg.ingest_calls) == 1
+        assert fkg.ingest_calls[0]["tier"] == "fkg_traversal"
+
+
+class TestBaselineTier:
+    """Tier 4: rolling-percentile anomalies."""
+
+    def anomaly(self, metric="items_processed", severity="warning"):
+        """
+        severity is a real derived property, not injected: `_METRIC_SEVERITY`
+        maps (items_processed, below) and (duration_ms, above) to "warning" —
+        the shapes this detector exists to catch — and the other two
+        directions to "info". Pick the direction that produces the requested
+        severity for the given metric rather than faking the property, so the
+        test exercises the real mapping.
+        """
+        severity_directions = {
+            ("items_processed", "warning"): "below",
+            ("items_processed", "info"): "above",
+            ("duration_ms", "warning"): "above",
+            ("duration_ms", "info"): "below",
+        }
+        direction = severity_directions[(metric, severity)]
+        return BaselineAnomaly(
+            workflow_id="wf-1",
+            metric=metric,
+            direction=direction,
+            observed=1.0,
+            p10=100.0,
+            p95=900.0,
+            sample_size=30,
+        )
+
+    @pytest.mark.asyncio
+    async def test_no_anomalies_answers_nothing(self, monkeypatch, fkg, baseline_tier):
+        patch_drift(monkeypatch, None)
+        engine = DiagnosticEngine(rule_engine=FakeRuleEngine(None))
+
+        result = await run(engine)
+
+        assert baseline_tier.calls == 1
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_warning_anomaly_clears_the_floor(self, monkeypatch, fkg, baseline_tier):
+        patch_drift(monkeypatch, None)
+        baseline_tier.anomalies = [self.anomaly(severity="warning")]
+        engine = DiagnosticEngine(rule_engine=FakeRuleEngine(None))
+
+        result = await run(engine)
+
+        assert result is not None
+        assert result.tier_used is DiagnosticTier.HISTORICAL_BASELINE
+        assert result.category == "silent"
+        assert result.confidence >= TIER_THRESHOLDS[DiagnosticTier.HISTORICAL_BASELINE]
+
+    @pytest.mark.asyncio
+    async def test_info_anomaly_falls_below_the_floor(self, monkeypatch, fkg, baseline_tier):
+        patch_drift(monkeypatch, None)
+        baseline_tier.anomalies = [self.anomaly(metric="items_processed", severity="info")]
+        engine = DiagnosticEngine(rule_engine=FakeRuleEngine(None))
+
+        result = await run(engine)
+
+        assert result is None, "an 'info' anomaly is usually harmless and should not answer"
+
+    @pytest.mark.asyncio
+    async def test_both_metrics_anomalous_prefers_items_processed(
+        self, monkeypatch, fkg, baseline_tier
+    ):
+        patch_drift(monkeypatch, None)
+        items = self.anomaly(metric="items_processed", severity="warning")
+        duration = self.anomaly(metric="duration_ms", severity="warning")
+        baseline_tier.anomalies = [duration, items]
+        engine = DiagnosticEngine(rule_engine=FakeRuleEngine(None))
+
+        result = await run(engine)
+
+        assert result.root_cause == items.describe()
+
+    @pytest.mark.asyncio
+    async def test_baseline_conclusion_is_ingested(self, monkeypatch, fkg, baseline_tier):
+        patch_drift(monkeypatch, None)
+        baseline_tier.anomalies = [self.anomaly(severity="warning")]
+        engine = DiagnosticEngine(rule_engine=FakeRuleEngine(None))
+
+        await run(engine)
+
+        assert len(fkg.ingest_calls) == 1
+        assert fkg.ingest_calls[0]["tier"] == "historical_baseline"
+
+
+class TestLlmJudgeTier:
+    """
+    Tier 5's own gate, HTTP call and response parsing have their own suite
+    (test_llm_judge.py). What belongs here is the cascade wiring: judge_llm is
+    reached only when tiers 1-4 all exhausted, its verdict becomes a
+    TieredDiagnosis with no confidence floor to clear, and a verdict is
+    ingested like any other tier's conclusion.
+    """
+
+    def fake_verdict(self, **overrides):
+        defaults = {
+            "root_cause": "Unhandled edge case in a custom function node",
+            "category": "logic",
+            "confidence": 0.4,
+            "suggested_fix": "Review the Code node's branching logic",
+            "remediation_playbook": None,
+            "requires_hitl": True,
+        }
+        defaults.update(overrides)
+        return JudgeVerdict(**defaults)
+
+    def patch_judge(self, monkeypatch, verdict):
+        calls = []
+
+        async def fake_judge(**kwargs):
+            calls.append(kwargs)
+            return verdict
+
+        monkeypatch.setattr(engine_module, "judge_llm", fake_judge)
+        return calls
+
+    @pytest.mark.asyncio
+    async def test_disabled_by_default_leaves_the_cascade_exhausted(
+        self, monkeypatch, fkg, baseline_tier
+    ):
+        """
+        No patch_judge here on purpose: ENABLE_LLM_JUDGE defaults to False, so
+        the real _rate_gate — not a fake — is what returns None. This is the
+        state most of this file's other tests run in without knowing it.
+        """
+        patch_drift(monkeypatch, None)
+        engine = DiagnosticEngine(rule_engine=FakeRuleEngine(None))
+
+        result = await run(engine)
+
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_low_confidence_verdict_still_answers_no_floor_to_clear(
+        self, monkeypatch, fkg, baseline_tier
+    ):
+        patch_drift(monkeypatch, None)
+        self.patch_judge(monkeypatch, self.fake_verdict(confidence=0.05))
+        engine = DiagnosticEngine(rule_engine=FakeRuleEngine(None))
+
+        result = await run(engine)
+
+        assert result is not None
+        assert result.tier_used is DiagnosticTier.LLM_JUDGE
+        assert result.confidence == 0.05
+        assert result.requires_hitl is True
+
+    @pytest.mark.asyncio
+    async def test_no_verdict_leaves_the_cascade_exhausted(
+        self, monkeypatch, fkg, baseline_tier
+    ):
+        patch_drift(monkeypatch, None)
+        self.patch_judge(monkeypatch, None)
+        engine = DiagnosticEngine(rule_engine=FakeRuleEngine(None))
+
+        result = await run(engine)
+
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_only_reached_after_tiers_1_to_4_are_exhausted(
+        self, monkeypatch, fkg, baseline_tier
+    ):
+        drift_state = patch_drift(monkeypatch, None)
+        judge_calls = self.patch_judge(monkeypatch, self.fake_verdict())
+        engine = DiagnosticEngine(rule_engine=FakeRuleEngine(None))
+
+        await run(engine)
+
+        assert drift_state["calls"] == 1
+        assert fkg.find_calls == 1
+        assert fkg.similarity_calls == 1
+        assert baseline_tier.calls == 1
+        assert len(judge_calls) == 1
+
+    @pytest.mark.asyncio
+    async def test_confident_tier_1_never_reaches_the_judge(
+        self, monkeypatch, fkg, baseline_tier
+    ):
+        patch_drift(monkeypatch, None)
+        judge_calls = self.patch_judge(monkeypatch, self.fake_verdict())
+        engine = DiagnosticEngine(rule_engine=FakeRuleEngine(rule_match(0.95)))
+
+        await run(engine)
+
+        assert judge_calls == []
+
+    @pytest.mark.asyncio
+    async def test_verdict_is_ingested_like_any_other_tier(
+        self, monkeypatch, fkg, baseline_tier
+    ):
+        patch_drift(monkeypatch, None)
+        self.patch_judge(monkeypatch, self.fake_verdict())
+        engine = DiagnosticEngine(rule_engine=FakeRuleEngine(None))
+
+        await run(engine)
+
+        assert len(fkg.ingest_calls) == 1
+        assert fkg.ingest_calls[0]["tier"] == "llm_judge"

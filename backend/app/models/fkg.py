@@ -47,12 +47,15 @@ from sqlalchemy.orm import Mapped, mapped_column
 from app.database import Base
 
 # Embedding width. The Blueprint specified 1536 (OpenAI text-embedding-3-small);
-# this is 1024, the width of the free OpenRouter embedding models and also of
-# bge-large, e5-large, gte-large, mistral-embed and Voyage — so it is the more
-# portable choice, not merely the available one. Changing it requires a
-# migration *and* a re-embed: vectors of different widths are not comparable,
-# and `embedding_model` on each node exists so a stale-width row is detectable
-# rather than silently returning garbage similarity.
+# this is 1024, matching the local model actually used —
+# app.services.diagnostic.embeddings runs intfloat/e5-large-v2 on CPU, decided
+# in DECISIONS.md (2026-08-21) for the same no-OpenAI-key reason this column
+# departs from the Blueprint's width. bge-large, gte-large, mistral-embed and
+# Voyage are also 1024-wide, so the choice was not narrowed to one option.
+# Changing it requires a migration *and* a re-embed: vectors of different
+# widths are not comparable, and `embedding_model` on each node exists so a
+# stale-width row is detectable rather than silently returning garbage
+# similarity.
 EMBEDDING_DIMENSIONS = 1024
 
 NODE_TYPES = (

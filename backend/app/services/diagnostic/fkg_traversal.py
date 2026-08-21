@@ -171,3 +171,74 @@ def best_remediation(matches: list[FKGMatch]) -> FKGMatch | None:
     if not playbooks:
         return None
     return min(playbooks, key=lambda m: (m.depth, -m.confidence))
+
+
+# Below this cosine similarity, the nearest neighbour is not the same fault —
+# just the least-different thing the graph happens to hold. Returning it would
+# be a plausible-sounding wrong answer, which is worse than no answer: nothing
+# downstream can tell "this is confidently the same failure" from "this is the
+# closest thing we found."
+_MIN_SIMILARITY = 0.85
+
+_SIMILARITY_SQL = text(
+    """
+    SELECT dedup_key, 1 - (embedding <=> :query_embedding::vector) AS similarity
+    FROM fkg_nodes
+    WHERE node_type = 'ErrorSignature'
+      AND embedding IS NOT NULL
+      AND (workspace_id = :workspace_id OR workspace_id IS NULL)
+    ORDER BY embedding <=> :query_embedding::vector
+    LIMIT 1
+    """
+)
+
+
+@dataclass
+class SimilarSignature:
+    """The nearest known ErrorSignature by embedding distance."""
+
+    dedup_key: str
+    similarity: float
+
+
+def _vector_literal(embedding: list[float]) -> str:
+    """pgvector's text input format: `[0.1,0.2,...]`."""
+    return "[" + ",".join(repr(float(x)) for x in embedding) + "]"
+
+
+async def find_similar_signature(
+    session: AsyncSession,
+    *,
+    workspace_id: uuid.UUID,
+    embedding: list[float],
+) -> SimilarSignature | None:
+    """
+    The nearest known ErrorSignature by embedding, if close enough to be worth
+    traversing from.
+
+    Exists for failures that do not hash-match anything: "rate limited, retry
+    after 30s" and "throttled — please retry in 30 seconds" describe the same
+    fault but normalize to different text, so `find_root_causes` finds nothing
+    for either from the other. This is the fallback that finds it anyway —
+    the caller is expected to traverse from the returned `dedup_key` using
+    `find_root_causes`, exactly as it would from an exact hash match; nothing
+    about the depth-decay or best-match logic downstream needs to know the
+    anchor was found by similarity rather than by hash.
+
+    None means either nothing in the graph has an embedding yet, or the
+    nearest neighbour found was not close enough to trust.
+    """
+    row = (
+        await session.execute(
+            _SIMILARITY_SQL,
+            {
+                "query_embedding": _vector_literal(embedding),
+                "workspace_id": str(workspace_id),
+            },
+        )
+    ).mappings().first()
+
+    if row is None or row["similarity"] < _MIN_SIMILARITY:
+        return None
+
+    return SimilarSignature(dedup_key=row["dedup_key"], similarity=float(row["similarity"]))
